@@ -20,6 +20,7 @@ here, with a default. Point the pipeline at a corpus, accept the defaults, and i
 """
 
 import sys
+import typing
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, List, Optional, Union
@@ -193,6 +194,8 @@ class Project:
     # --- path helpers ---
     def p(self, rel: str) -> Path:
         """Resolve a path relative to the project root."""
+        if self.root == Path():
+            raise ValueError("Project.root is unset; construct via load_project rather than Project(...) directly")
         return (self.root / rel).resolve()
 
     def corpus_path(self) -> Path:
@@ -223,10 +226,27 @@ def _maybe_load_text(root: Path, value: Any) -> str:
     Otherwise return `value` unchanged (so inline text in the TOML still works)."""
     if not isinstance(value, str):
         return value
-    candidate = (root / value)
-    if candidate.is_file() and len(value) < 256 and "\n" not in value:
+    if not (len(value) < 256 and "\n" not in value):
+        return value
+    candidate = (root / value).resolve()
+    # Resolve both sides so '../' segments are normalized before the containment check —
+    # otherwise a string like "../../etc/passwd" would silently exfiltrate to an LLM.
+    if not candidate.is_relative_to(root):
+        return value
+    if candidate.is_file():
         return candidate.read_text(encoding="utf-8")
     return value
+
+
+_HINTS_CACHE: dict[type, dict[str, Any]] = {}
+
+
+def _hints(cls):
+    h = _HINTS_CACHE.get(cls)
+    if h is None:
+        h = typing.get_type_hints(cls)
+        _HINTS_CACHE[cls] = h
+    return h
 
 
 def _build_dataclass(cls, data: dict, root: Path):
@@ -235,12 +255,12 @@ def _build_dataclass(cls, data: dict, root: Path):
     if not is_dataclass(cls):
         return data
     kwargs = {}
+    hints = _hints(cls)
     field_map = {f.name: f for f in fields(cls)}
     for key, raw in (data or {}).items():
         if key not in field_map:
             continue  # ignore unknown keys (forward-compat)
-        f = field_map[key]
-        ftype = f.type
+        ftype = hints.get(key, field_map[key].type)
         # nested dataclass?
         if is_dataclass(ftype) and isinstance(raw, dict):
             kwargs[key] = _build_dataclass(ftype, raw, root)
@@ -251,10 +271,12 @@ def _build_dataclass(cls, data: dict, root: Path):
             kwargs[key] = [_build_dataclass(ftype.__args__[0], item, root) for item in raw]
         else:
             kwargs[key] = raw
-    # resolve text references
-    for name in _TEXT_REF_FIELDS:
-        if name in kwargs:
-            kwargs[name] = _maybe_load_text(root, kwargs[name])
+    # resolve text references — scoped to Project so nested dataclasses can't accidentally
+    # collide with these names (e.g. a future field called `content_rules` elsewhere).
+    if cls is Project:
+        for name in _TEXT_REF_FIELDS:
+            if name in kwargs:
+                kwargs[name] = _maybe_load_text(root, kwargs[name])
     # mode/triage description files: a ModeSpec.description that names a file gets loaded;
     # a TriageConfig.rubric that names a file gets loaded; ditto DeployConfig.system_message.
     if cls is ModeSpec and "description" in kwargs:
@@ -264,6 +286,27 @@ def _build_dataclass(cls, data: dict, root: Path):
     if cls is DeployConfig and "system_message" in kwargs:
         kwargs["system_message"] = _maybe_load_text(root, kwargs["system_message"])
     return cls(**kwargs)
+
+
+def _validate(proj: Project, *, seeds_explicit: bool) -> None:
+    """Sanity asserts after a project is loaded. Raises ValueError on configurations that
+    can't possibly run; emits stderr warnings for soft issues (empty corpus, missing default
+    seeds) so freshly-scaffolded templates still load."""
+    if proj.modes and sum(m.weight for m in proj.modes) <= 0:
+        raise ValueError("mode weights sum to <= 0; at least one mode must have a positive weight")
+    if proj.categories and not any(c.weight > 0 for c in proj.categories):
+        raise ValueError("all category weights are 0; at least one category must have a positive weight")
+    cdir = proj.corpus_path()
+    if not cdir.is_dir():
+        print(f"[project] warning: corpus_dir {cdir} does not exist", file=sys.stderr)
+    elif not any(fp.suffix.lower() in (".txt", ".md") for fp in cdir.iterdir() if fp.is_file()):
+        print(f"[project] warning: corpus_dir {cdir} has no .txt/.md files", file=sys.stderr)
+    if proj.seeds_file:
+        sp = proj.p(proj.seeds_file)
+        if not sp.is_file():
+            if seeds_explicit:
+                raise ValueError(f"seeds_file is set to {proj.seeds_file!r} but {sp} does not exist")
+            print(f"[project] warning: seeds_file default {proj.seeds_file!r} not found at {sp}", file=sys.stderr)
 
 
 def load_project(path: str | Path) -> Project:
@@ -278,10 +321,11 @@ def load_project(path: str | Path) -> Project:
     if not toml_path.is_file():
         raise FileNotFoundError(f"no project.toml at {toml_path}")
     data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+    seeds_explicit = isinstance(data, dict) and "seeds_file" in data
 
-    proj = _build_dataclass(Project, data, root)
-    proj.root = root
+    proj = _build_dataclass(Project, {**data, "root": root}, root)
 
+    _validate(proj, seeds_explicit=seeds_explicit)
     # Glossary text is read lazily by stages that need it (synthesis); we just keep the path.
     return proj
 
@@ -310,10 +354,10 @@ def load_seeds(proj: Project) -> list[dict]:
         try:
             obj = json.loads(line)
         except json.JSONDecodeError as e:
-            print(f"[seeds] skipping malformed line {i} in {p}: {e}")
+            print(f"[seeds] skipping malformed line {i} in {p}: {e}", file=sys.stderr)
             continue
         if not isinstance(obj, dict) or not isinstance(obj.get("messages"), list):
-            print(f"[seeds] skipping line {i} in {p}: not a {{messages: [...]}} object")
+            print(f"[seeds] skipping line {i} in {p}: not a {{messages: [...]}} object", file=sys.stderr)
             continue
         obj.setdefault("mode", default_mode)
         out.append(obj)

@@ -44,10 +44,12 @@ def template_dir(template: str) -> Path:
 
 def create_project(dest, *, template: str = "character", name: str, description: str = "") -> Path:
     """Copy `template` to `dest`, substituting {{NAME}}/{{DESCRIPTION}}. Returns the project dir.
-    `dest` must not exist or must be empty."""
+    `dest` must not exist or must be empty (and must not already contain a project.toml)."""
     dest = Path(dest).expanduser().resolve()
     if dest.exists() and dest.is_file():
         raise FileExistsError(f"{dest} is a file")
+    if dest.is_dir() and (dest / "project.toml").is_file():
+        raise FileExistsError(f"{dest} already contains a project.toml; refusing to overwrite")
     if dest.is_dir() and any(dest.iterdir()):
         raise FileExistsError(f"{dest} exists and is not empty")
     src = template_dir(template)
