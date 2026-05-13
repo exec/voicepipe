@@ -29,7 +29,7 @@ Setup:
   python3 -m pip install discord.py openai
   # In Discord developer portal: enable "Message Content Intent" under the
   # bot's Privileged Gateway Intents.
-  python3 scripts/discord_bot.py
+  python3 -m pipeline.serve.discord_bot
 """
 
 import asyncio
@@ -38,10 +38,23 @@ import os
 import random
 import re
 import sys
+import time
+import unicodedata
+import collections
 from typing import Optional
 
 import discord
 from openai import OpenAI
+
+# Zero-width / format-control characters used to bypass naive regex matching.
+# (ZWSP, ZWNJ, ZWJ, LRM, RLM, ALM, BOM, soft hyphen, word joiner.)
+_ZW_STRIP_RE = re.compile(r"[­​-‏⁠⁡‪-‮⁦-⁩﻿]")
+
+
+def _normalize_for_match(text: str) -> str:
+    """NFKC-fold + strip zero-width characters so homoglyph / ZWSP bypasses don't
+    sneak past the slur/year/group-attribution regexes below."""
+    return _ZW_STRIP_RE.sub("", unicodedata.normalize("NFKC", text))
 
 # ---------- output moderation ----------
 # The model bakes in Dec's voice; safety is enforced HERE, at the boundary.
@@ -64,6 +77,12 @@ _SAFETY_PATTERNS: list[tuple[str, "re.Pattern"]] = [
     ("namegame", re.compile(r"[a-z](SEN|COHN|FELT|SHANKER)\b")),
     # Post-1996 references — Dec died January 1996. Any year 1997+ or obvious modern artifact.
     ("post1996", re.compile(r"\b(199[7-9]|20[0-9]{2}|21[0-9]{2})\b")),
+    # Spelled-out modern years: "twenty twenty-three", "twenty oh five", "two thousand and ten".
+    # Smell flag — wider than the digit form, but the worst false positive is "two thousand
+    # people" (rare in a Dec rant) and "twenty nineteen" colocates only with year-talk in practice.
+    ("post1996", re.compile(
+        r"\b(twenty\s+(?:twenty[-\s]?\w+|oh\s+\w+|nineteen|thirty|forty|fifty)|"
+        r"two\s+thousand(?:\s+and)?\s+(?:\w+))\b", re.I)),
     ("post1996", re.compile(
         r"\b(covid|coronavirus|smartphone|iphone|android\b|tiktok|twitter|facebook|instagram|"
         r"youtube|wi-?fi|broadband|chatgpt|openai|anthropic|9/11|september 11|world trade center)\b",
@@ -94,8 +113,14 @@ _DEFLECTION = ("The Worldwide Mad Deadly Communist Gangster Computer God's Thres
 
 
 def moderate_output(text: str) -> tuple[list[str], list[str]]:
-    """Return (safety_flags, style_flags) found in `text`. Empty lists = clean."""
-    safety = [tag for tag, pat in _SAFETY_PATTERNS if pat.search(text)]
+    """Return (safety_flags, style_flags) found in `text`. Empty lists = clean.
+
+    Normalizes via NFKC + zero-width-strip before matching so a slur with an inserted
+    ZWSP / smart-quote homoglyph / fullwidth-form trick doesn't slip past."""
+    probe = _normalize_for_match(text)
+    safety = [tag for tag, pat in _SAFETY_PATTERNS if pat.search(probe)]
+    # Style tic is checked against the original text — the rhetorical pattern is what we care
+    # about, and normalization shouldn't affect ASCII quote matching anyway.
     style = ["the_quote_tic"] if len(_TIC_RE.findall(text)) > _TIC_THRESHOLD else []
     return safety, style
 
@@ -128,6 +153,15 @@ GEN_TEMPERATURE   = float(os.environ.get("GEN_TEMPERATURE", "0.85"))
 GEN_TOP_P         = float(os.environ.get("GEN_TOP_P", "0.9"))
 GEN_MAX_TOKENS    = int(os.environ.get("GEN_MAX_TOKENS", "400"))
 
+# Rate limiting. RESPONSE_MODE=always + one chatty user is a flooding vector — silently drop
+# messages over the budget (no "rate limited" reply: that's both noise and an info leak about
+# how the limiter's tuned).
+DISCORD_PER_USER_RPM      = int(os.environ.get("DISCORD_PER_USER_RPM", "6"))
+DISCORD_GLOBAL_COOLDOWN_S = float(os.environ.get("DISCORD_GLOBAL_COOLDOWN_S", "2"))
+
+# Privacy knob: by default log only message length, not content. Flip on when actively debugging.
+LOG_PROMPT_PREVIEW = os.environ.get("LOG_PROMPT_PREVIEW", "").lower() in ("1", "true", "yes", "on")
+
 DISCORD_MAX_LEN = 2000
 
 logging.basicConfig(level=logging.INFO,
@@ -148,6 +182,27 @@ class DecBot(discord.Client):
         # Serialize replies per channel — if two messages land at once, answer
         # them in order rather than racing two LLM calls in parallel.
         self.channel_locks: dict[int, asyncio.Lock] = {}
+        # Sliding-window per-user reply timestamps + a global last-reply timestamp.
+        self._user_reply_times: dict[int, collections.deque[float]] = collections.defaultdict(
+            lambda: collections.deque(maxlen=max(DISCORD_PER_USER_RPM, 1) * 2))
+        self._global_last_reply_at: float = 0.0
+
+    def _rate_limit_ok(self, author_id: int) -> bool:
+        """True if we may reply to this author right now. Updates state if so. Silent on deny —
+        no Discord message goes out, so a flooder can't probe the limit boundary."""
+        now = time.monotonic()
+        if now - self._global_last_reply_at < DISCORD_GLOBAL_COOLDOWN_S:
+            return False
+        if DISCORD_PER_USER_RPM > 0:
+            window = self._user_reply_times[author_id]
+            cutoff = now - 60.0
+            while window and window[0] < cutoff:
+                window.popleft()
+            if len(window) >= DISCORD_PER_USER_RPM:
+                return False
+            window.append(now)
+        self._global_last_reply_at = now
+        return True
 
     async def on_ready(self):
         log.info(f"connected as {self.user} (id={self.user.id})")
@@ -235,6 +290,10 @@ class DecBot(discord.Client):
     async def on_message(self, message: discord.Message):
         if not self._should_reply(message):
             return
+        if not self._rate_limit_ok(message.author.id):
+            # Silent drop — see _rate_limit_ok.
+            log.debug(f"rate-limited drop: author_id={message.author.id}")
+            return
 
         lock = self.channel_locks.setdefault(message.channel.id, asyncio.Lock())
         async with lock:
@@ -242,8 +301,12 @@ class DecBot(discord.Client):
                 recent = await self._fetch_recent(message.channel, before=message)
                 user_prompt = self._build_user_prompt(recent, message)
 
-                log.info(f"trigger from {message.author.display_name}: "
-                         f"{message.content[:80]!r}")
+                if LOG_PROMPT_PREVIEW:
+                    log.info(f"trigger from {message.author.display_name}: "
+                             f"{message.content[:80]!r}")
+                else:
+                    log.info(f"trigger from {message.author.display_name}: "
+                             f"{len(message.content)} chars")
 
                 async with message.channel.typing():
                     response = await self._generate(user_prompt)
@@ -289,14 +352,18 @@ class DecBot(discord.Client):
 # ---------- helpers ----------
 
 def _chunk_for_discord(text: str, limit: int = DISCORD_MAX_LEN) -> list[str]:
-    """Split a long response into <=`limit`-char chunks at whitespace boundaries."""
+    """Split a long response into <=`limit`-char chunks. Prefer paragraph (\\n), then
+    word (' ') boundaries; fall through to a hard cut at `limit` only if neither is
+    available within the window — which means a markdown code block or a very long URL
+    can still get cut mid-token. That's acceptable for a prose chatbot."""
     if len(text) <= limit:
         return [text]
     chunks = []
     remaining = text
     while len(remaining) > limit:
-        # find last whitespace within limit
-        cut = remaining.rfind(" ", 0, limit)
+        cut = remaining.rfind("\n", 0, limit)
+        if cut <= 0:
+            cut = remaining.rfind(" ", 0, limit)
         if cut <= 0:
             cut = limit
         chunks.append(remaining[:cut].rstrip())
