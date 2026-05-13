@@ -19,9 +19,11 @@ Design notes:
 """
 
 import argparse
+import asyncio
 import json
 import os
 import re
+import secrets
 import sys
 import time
 from dataclasses import asdict
@@ -32,11 +34,13 @@ try:
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse, FileResponse
     from fastapi.staticfiles import StaticFiles
+    from pydantic import BaseModel, ConfigDict
 except ImportError as e:  # pragma: no cover
     raise SystemExit("the GUI server needs FastAPI + uvicorn — `pip install -e .[gui]`") from e
 
 from pipeline import jobs as jobsmod
 from pipeline import scaffold
+from pipeline import util as utilmod
 from pipeline.project import load_project, Project
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -113,52 +117,16 @@ def _start_parent_watchdog() -> None:
     threading.Thread(target=_watch, daemon=True).start()
 
 
+# The canonical env-file loader/writer pair lives in pipeline.util — keep thin wrappers here so
+# call sites in this module read naturally. _ENV_FILE (above) is kept as a UX label only.
 def _load_env_file() -> None:
-    """Load `KEY=VALUE` lines from ~/.config/voicepipe/env into os.environ (without clobbering
-    anything already set). Same file the systemd unit reads via EnvironmentFile=. A handy place
-    for OLLAMA_API_KEY and VOICEPIPE_AUTH_TOKEN so `voicepipe serve` (and the stage subprocesses
-    it spawns) pick them up automatically."""
-    if not _ENV_FILE.is_file():
-        return
-    for line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, _, v = line.partition("=")
-        k, v = k.strip(), v.strip().strip('"').strip("'")
-        if k and k not in os.environ:
-            os.environ[k] = v
+    utilmod.load_env_file()
 
 
 def _set_env_file_var(key: str, value: str) -> None:
-    """Update or append `KEY=value` in ~/.config/voicepipe/env (preserving other lines/comments),
-    and set os.environ[key] so it takes effect for stage subprocesses spawned afterward. An empty
-    value removes the key."""
-    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    lines = _ENV_FILE.read_text(encoding="utf-8").splitlines() if _ENV_FILE.is_file() else [
-        "# voicepipe — loaded by `voicepipe serve` (and read by deploy/voicepipe.service via EnvironmentFile=)"
-    ]
-    out, found = [], False
-    for ln in lines:
-        s = ln.strip()
-        if s and not s.startswith("#") and s.split("=", 1)[0].strip() == key:
-            found = True
-            if value:
-                out.append(f"{key}={value}")
-            # else: drop the line
-        else:
-            out.append(ln)
-    if not found and value:
-        out.append(f"{key}={value}")
-    _ENV_FILE.write_text("\n".join(out) + "\n", encoding="utf-8")
-    try:
-        os.chmod(_ENV_FILE, 0o600)
-    except OSError:
-        pass
-    if value:
-        os.environ[key] = value
-    else:
-        os.environ.pop(key, None)
+    """Persist `KEY=value` to ~/.config/voicepipe/env. Raises RuntimeError if the file can't be
+    chmod'd to 0600 — secrets aren't allowed to live world-readable."""
+    utilmod.set_env_file_var(key, value)
 
 # Fields whose (long) string value is spilled to prompts/<field>.md and referenced by filename
 # when the GUI writes a config — mirrors how a human authors project.toml.
@@ -460,16 +428,131 @@ def _toml_dumps(obj, _prefix="") -> str:
     return out.strip() + "\n"
 
 
+# --------------------------------------------------------------------------- request schemas
+
+class _ConfigPut(BaseModel):
+    """PUT /v1/config — the known keys. Unknown keys are rejected (422)."""
+    model_config = ConfigDict(extra="forbid")
+    project_roots: list[str] | None = None
+    llama_cpp_dir: str | None = None
+    ollama_api_key: str | None = None
+
+
+class _NewProject(BaseModel):
+    """POST /v1/projects — either register an existing dir (path) or scaffold a new one
+    (name+template). Unknown keys are rejected so a typo doesn't silently degrade to a scaffold."""
+    model_config = ConfigDict(extra="forbid")
+    path: str | None = None
+    name: str | None = None
+    description: str | None = ""
+    template: str | None = "character"
+    parent_dir: str | None = None
+
+
+class _FilePut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    content: str = ""
+
+
+class _RunStage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    smoke: bool | None = False
+    gpu: int | None = None
+    overrides: dict[str, object] | None = None
+
+
+# Project-config PUT body is the full Project dataclass (huge surface), so it stays a free-form
+# dict — but we validate it round-trips through load_project before accepting it (existing
+# behaviour, just kept explicit here).
+class _ProjectConfigPut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    config: dict | None = None
+
+
+# What we'll accept as a "project root" via POST /v1/projects { path }. Absolute paths must live
+# under one of these, or be a configured project root, or already be on the registry. Symlinks-
+# to-elsewhere are caught by resolving with strict semantics before the check.
+def _allowed_project_roots(reg: "Registry") -> list[Path]:
+    """The dirs an absolute `path` is allowed to live under for POST /v1/projects."""
+    roots: list[Path] = []
+    roots.extend(reg.roots)
+    roots.append(Path.home().resolve())
+    return [r.resolve() for r in roots]
+
+
+def _path_within_any(p: Path, roots: list[Path]) -> bool:
+    p = p.resolve()
+    for r in roots:
+        try:
+            p.relative_to(r)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+# Allow-list for what put_file can write. Editing project source (prompts, corpus, seeds,
+# project.toml itself) is in scope; writing arbitrary binaries is not.
+_PUT_FILE_EXTS = {".md", ".txt", ".jsonl", ".toml"}
+_PUT_FILE_MAX_BYTES = 1 * 1024 * 1024  # 1 MiB
+
+
 # --------------------------------------------------------------------------- the app
 
-def create_app(roots: list[Path], *, auth_token: str | None = None, auth_required: bool = False) -> FastAPI:
+def create_app(roots: list[Path], *, auth_token: str | None = None, auth_required: bool = False,
+               bind_host: str | None = None) -> FastAPI:
     app = FastAPI(title="voicepipe", version="0.1.0")
-    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+    # CORS: the web UI is same-origin (served by this very process), so wildcards aren't needed.
+    # On loopback we permit any origin (a stale tab on a different port; the desktop sidecar
+    # reaches us by IP+port that may not be `http://localhost`). Bound non-loopback, we lock down
+    # to same-origin only — no `*`, no credentials cross-site.
+    is_loopback_bind = bind_host in (None, "127.0.0.1", "::1", "localhost")
+    if is_loopback_bind:
+        app.add_middleware(CORSMiddleware,
+                           allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:[0-9]+)?$",
+                           allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+                           allow_headers=["Authorization", "Content-Type", "X-Auth-Token"])
+    else:
+        # Same-origin only — UI is served from this server. No cross-origin browsers expected.
+        app.add_middleware(CORSMiddleware, allow_origins=[],
+                           allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+                           allow_headers=["Authorization", "Content-Type", "X-Auth-Token"])
     reg = Registry(roots)
     mgr = jobsmod.JobManager()
     mgr.scan([d for _, d in reg.all()])
 
+    # Cached job scan — the SSE polling loop + the GUI's 4s job-list refresh shouldn't serialize
+    # on a full disk walk under the JobManager lock. Invalidated on start/cancel + after _SCAN_TTL.
+    _SCAN_TTL = 10.0
+    _scan_state = {"ts": 0.0}
+
+    def _scan_jobs(force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and (now - _scan_state["ts"]) < _SCAN_TTL:
+            return
+        mgr.scan([d for _, d in reg.all()])
+        _scan_state["ts"] = now
+
     need_auth = bool(auth_token) and auth_required
+
+    # Short-lived SSE tickets: EventSource can't set Authorization headers, so an authenticated
+    # client GETs /v1/sse-ticket and appends ?ticket=... to the events URL. The ticket is single-
+    # use and expires in 30s. This is the documented exception to "no tokens in URLs".
+    _tickets: dict[str, float] = {}
+    _TICKET_TTL = 30.0
+
+    def _make_ticket() -> str:
+        t = secrets.token_urlsafe(24)
+        _tickets[t] = time.monotonic() + _TICKET_TTL
+        # opportunistic GC of expired tickets
+        now = time.monotonic()
+        for k in [k for k, exp in _tickets.items() if exp < now]:
+            _tickets.pop(k, None)
+        return t
+
+    def _consume_ticket(t: str) -> bool:
+        exp = _tickets.pop(t, None)
+        return bool(exp) and exp > time.monotonic()
 
     # /v1/health is always reachable (liveness probe; lets the UI learn auth_required before anything else).
     _AUTH_EXEMPT = ("/v1/health",)
@@ -478,14 +561,29 @@ def create_app(roots: list[Path], *, auth_token: str | None = None, auth_require
     async def _auth(request: Request, call_next):
         path = request.url.path
         if need_auth and path.startswith("/v1") and path not in _AUTH_EXEMPT and request.method != "OPTIONS":
-            tok = None
+            # SSE events endpoint also accepts a single-use ticket on the query string (because
+            # EventSource can't set headers). Every other endpoint must use Authorization.
+            if path.startswith("/v1/jobs/") and path.endswith("/events"):
+                tk = request.query_params.get("ticket") or ""
+                if tk and _consume_ticket(tk):
+                    return await call_next(request)
+            tok = ""
             authz = request.headers.get("authorization", "")
             if authz.lower().startswith("bearer "):
                 tok = authz[7:].strip()
-            tok = tok or request.query_params.get("token") or request.cookies.get("vp_token")
-            if tok != auth_token:
+            if not tok:
+                tok = request.headers.get("x-auth-token", "") or request.cookies.get("vp_token", "")
+            # constant-time compare; both sides are str
+            if not secrets.compare_digest(tok or "", auth_token or ""):
                 return JSONResponse({"detail": "unauthorized"}, status_code=401)
         return await call_next(request)
+
+    @app.get("/v1/sse-ticket")
+    def sse_ticket():
+        """Mint a single-use, 30s-TTL token for the SSE events endpoint (EventSource can't set
+        an Authorization header). The ticket is consumed on first use. No-op-ish but harmless
+        when auth isn't required."""
+        return {"ticket": _make_ticket(), "ttl_sec": _TICKET_TTL}
 
     # ---- meta ----
 
@@ -533,59 +631,74 @@ def create_app(roots: list[Path], *, auth_token: str | None = None, auth_require
         return _settings_payload()
 
     @app.put("/v1/config")
-    async def put_config(request: Request):
-        body = await request.json()
+    def put_config(body: _ConfigPut):
         cfg = _load_app_config()
-        if "project_roots" in body:
-            roots_in = body["project_roots"]
-            if not isinstance(roots_in, list):
-                raise HTTPException(400, "project_roots must be a list of directory paths")
+        provided = body.model_dump(exclude_unset=True)
+        if "project_roots" in provided:
+            roots_in = provided["project_roots"] or []
             new_roots = [Path(str(r)).expanduser().resolve() for r in roots_in if str(r).strip()]
             cfg["project_roots"] = [str(r) for r in new_roots]
             reg.roots = new_roots
             reg.refresh()
-            mgr.scan([d for _, d in reg.all()])
-        if "llama_cpp_dir" in body:
-            v = str(body["llama_cpp_dir"] or "").strip()
+            _scan_jobs(force=True)
+        if "llama_cpp_dir" in provided:
+            v = str(provided["llama_cpp_dir"] or "").strip()
             if v:
                 cfg["llama_cpp_dir"] = str(Path(v).expanduser())
             else:
                 cfg.pop("llama_cpp_dir", None)
         _save_app_config(cfg)
-        if "ollama_api_key" in body:                       # write to ~/.config/voicepipe/env (mode 600)
-            _set_env_file_var("OLLAMA_API_KEY", str(body["ollama_api_key"] or "").strip())
+        if "ollama_api_key" in provided:                   # write to ~/.config/voicepipe/env (mode 600)
+            try:
+                _set_env_file_var("OLLAMA_API_KEY", str(provided["ollama_api_key"] or "").strip())
+            except RuntimeError as e:
+                raise HTTPException(500, f"couldn't persist API key securely: {e}")
         return _settings_payload()
 
     # ---- projects ----
 
     @app.get("/v1/projects")
     def list_projects():
+        _scan_jobs()
         return [_project_summary(reg, d) for _, d in reg.all()]
 
     @app.post("/v1/projects")
-    async def create_project(request: Request):
-        body = await request.json()
-        if body.get("path"):
-            p = Path(body["path"]).expanduser().resolve()
+    def create_project(body: _NewProject):
+        if body.path:
+            # Refuse paths that don't resolve to somewhere we expect projects to live: a
+            # configured root, the user's home tree, or somewhere already on the registry.
+            p_in = Path(body.path).expanduser()
+            try:
+                p = p_in.resolve(strict=True)
+            except (OSError, RuntimeError):
+                raise HTTPException(400, f"no such path: {body.path}")
+            if not p.is_dir():
+                raise HTTPException(400, f"not a directory: {p}")
+            allowed = _allowed_project_roots(reg)
+            already_registered = str(p) in [str(Path(x).resolve()) for x in _load_registry().get("paths", [])]
+            if not (already_registered or _path_within_any(p, allowed)):
+                raise HTTPException(400,
+                    f"path {p} is not under a configured project root or your home directory; "
+                    "add it as a project root in Settings first")
             if not (p / "project.toml").is_file():
                 raise HTTPException(400, f"no project.toml at {p}")
             _register_path(p); _unhide_project(p)
             reg.refresh()
             return _project_detail(reg, p)
         # scaffold
-        name = body.get("name")
+        name = body.name
         if not name:
             raise HTTPException(400, "name (or path) required")
-        template = body.get("template", "character")
-        parent = Path(body.get("parent_dir") or (Path.home() / "voicepipe-projects")).expanduser().resolve()
+        template = body.template or "character"
+        parent = Path(body.parent_dir or (Path.home() / "voicepipe-projects")).expanduser().resolve()
         dest = parent / _slugify(name)
         try:
-            scaffold.create_project(dest, template=template, name=name, description=body.get("description", ""))
+            scaffold.create_project(dest, template=template, name=name, description=body.description or "")
         except (FileExistsError, ValueError) as e:
             raise HTTPException(400, str(e))
         _register_path(dest); _unhide_project(dest)
         reg.refresh()
-        mgr.scan([dest])
+        _scan_jobs(force=True)
         return _project_detail(reg, dest)
 
     def _dir(project_id: str) -> Path:
@@ -619,11 +732,23 @@ def create_app(roots: list[Path], *, auth_token: str | None = None, auth_require
         return {"ok": True, "removed": str(d), "purged": bool(purge)}
 
     @app.put("/v1/projects/{project_id}/config")
-    async def put_config(project_id: str, request: Request):
+    async def put_project_config(project_id: str, request: Request):
+        # The project config is the full Project dataclass — too sprawling for a flat Pydantic
+        # schema. We do the validation that matters: it must be a JSON object, and the merged
+        # result must load via load_project (already done inside _write_config). That keeps the
+        # surface "any TOML-compatible dict" without letting truly broken shapes corrupt the file.
         d = _dir(project_id)
-        body = await request.json()
         try:
-            _write_config(d, body.get("config", body))
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "body must be JSON")
+        if not isinstance(body, dict):
+            raise HTTPException(400, "body must be a JSON object")
+        incoming = body.get("config", body) if isinstance(body.get("config", None), dict) else body
+        if not isinstance(incoming, dict):
+            raise HTTPException(400, "config must be a JSON object")
+        try:
+            _write_config(d, incoming)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(400, f"config did not validate: {type(e).__name__}: {e}")
         reg.refresh()
@@ -658,30 +783,33 @@ def create_app(roots: list[Path], *, auth_token: str | None = None, auth_require
         return PlainTextResponse(fp.read_text(encoding="utf-8", errors="replace"))
 
     @app.put("/v1/projects/{project_id}/files/{relpath:path}")
-    async def put_file(project_id: str, relpath: str, request: Request):
+    def put_file(project_id: str, relpath: str, body: _FilePut):
         fp = _safe_child(_dir(project_id), relpath)
-        body = await request.json()
+        ext = fp.suffix.lower()
+        if ext not in _PUT_FILE_EXTS:
+            raise HTTPException(400, f"refusing to write {ext or '<no extension>'} — only "
+                                     f"{sorted(_PUT_FILE_EXTS)} are editable through this endpoint")
+        content = body.content or ""
+        if len(content.encode("utf-8")) > _PUT_FILE_MAX_BYTES:
+            raise HTTPException(400, f"file is larger than the {_PUT_FILE_MAX_BYTES}-byte cap")
         fp.parent.mkdir(parents=True, exist_ok=True)
-        fp.write_text(body.get("content", ""), encoding="utf-8")
+        fp.write_text(content, encoding="utf-8")
         return {"ok": True, "path": str(fp)}
 
     # ---- stage runs ----
 
     @app.post("/v1/projects/{project_id}/stages/{stage}/run")
-    async def run_stage(project_id: str, stage: str, request: Request):
+    def run_stage(project_id: str, stage: str, body: _RunStage | None = None):
         d = _dir(project_id)
-        body = {}
+        b = body or _RunStage()
         try:
-            body = await request.json()
-        except Exception:
-            pass
-        try:
-            meta = mgr.start(d, stage, overrides=body.get("overrides"),
-                             smoke=bool(body.get("smoke")), gpu=body.get("gpu"))
+            meta = mgr.start(d, stage, overrides=b.overrides,
+                             smoke=bool(b.smoke), gpu=b.gpu)
         except RuntimeError as e:      # already running
             raise HTTPException(409, str(e))
         except (ValueError, FileNotFoundError) as e:
             raise HTTPException(400, str(e))
+        _scan_state["ts"] = 0.0    # next /v1/jobs should see the new job immediately
         return JSONResponse(meta, status_code=201)
 
     # ---- jobs ----
@@ -694,7 +822,7 @@ def create_app(roots: list[Path], *, auth_token: str | None = None, auth_require
                 pd = reg.dir_for(project)
             except KeyError:
                 pd = Path(project)
-        mgr.scan([d for _, d in reg.all()])
+        _scan_jobs()
         return mgr.list(pd)
 
     @app.get("/v1/jobs/{job_id}")
@@ -717,46 +845,66 @@ def create_app(roots: list[Path], *, auth_token: str | None = None, auth_require
     @app.post("/v1/jobs/{job_id}/cancel")
     def cancel_job(job_id: str):
         try:
-            return mgr.cancel(job_id)
+            res = mgr.cancel(job_id)
         except KeyError:
             raise HTTPException(404, f"no job {job_id}")
+        _scan_state["ts"] = 0.0
+        return res
 
     @app.get("/v1/jobs/{job_id}/events")
-    async def job_events(job_id: str, since: int = 0):
+    async def job_events(request: Request, job_id: str, since: int = 0):
         meta = mgr.get(job_id)
         if not meta:
             raise HTTPException(404, f"no job {job_id}")
 
         async def gen():
-            import asyncio
             seq = since
             saw_terminal = False
             idle = 0
-            while True:
-                evts = mgr.read_events(job_id, since=seq)
-                for e in evts:
-                    seq = e["seq"]
-                    if e.get("type") == "stage_end":
-                        saw_terminal = True
-                    yield f"data: {json.dumps(e)}\n\n"
-                if evts:
-                    idle = 0
-                else:
-                    idle += 1
-                if saw_terminal:
-                    break
-                if not mgr.is_running(job_id) and idle > 4:   # process gone, give the file a moment to flush
-                    # one last drain
-                    for e in mgr.read_events(job_id, since=seq):
+            ended_sent = False
+            try:
+                while True:
+                    if await request.is_disconnected():
+                        return    # client tab closed; stop generating, don't send trailers
+                    evts = mgr.read_events(job_id, since=seq)
+                    for e in evts:
                         seq = e["seq"]
+                        if e.get("type") == "stage_end":
+                            saw_terminal = True
                         yield f"data: {json.dumps(e)}\n\n"
+                    if evts:
+                        idle = 0
+                    else:
+                        idle += 1
+                    if saw_terminal:
+                        break
+                    if not mgr.is_running(job_id) and idle > 4:   # process gone, give the file a moment to flush
+                        # one last drain
+                        for e in mgr.read_events(job_id, since=seq):
+                            seq = e["seq"]
+                            yield f"data: {json.dumps(e)}\n\n"
+                        break
+                    await asyncio.sleep(0.5)
+            finally:
+                if not ended_sent:
                     yield f"event: end\ndata: {json.dumps({'job_id': job_id})}\n\n"
-                    break
-                await asyncio.sleep(0.5)
-            yield f"event: end\ndata: {json.dumps({'job_id': job_id})}\n\n"
+                    ended_sent = True
 
         return StreamingResponse(gen(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    @app.on_event("shutdown")
+    def _kill_children():
+        """When the server is asked to shut down (SIGTERM/SIGINT to uvicorn or programmatic stop),
+        signal every running stage subprocess so we don't leave orphans. `start_new_session=True`
+        means the children are in their own process groups; without this their parent (us) goes
+        away and they keep running, attached to PID 1."""
+        try:
+            n = mgr.kill_all(grace=2.0)
+            if n:
+                print(f"[serve] shutdown: signalled {n} running stage subprocess(es)")
+        except Exception as e:  # noqa: BLE001
+            print(f"[serve] shutdown: kill_all failed: {e}", file=sys.stderr)
 
     # ---- the web UI (static) ----
 
@@ -791,7 +939,32 @@ def _jsonable_default_project() -> Project:
 
 # --------------------------------------------------------------------------- entrypoint
 
+_MIN_AUTH_TOKEN_LEN = 32   # required for non-loopback binds
+
+
+def _token_looks_strong(tok: str) -> tuple[bool, str]:
+    """Cheap entropy check for the public-exposure path. We don't try to be clever (zxcvbn etc.) —
+    just enforce a length floor and rule out the obvious low-entropy mistakes (single-character
+    repeats, single-class strings shorter than 32). Returns (ok, reason)."""
+    if len(tok) < _MIN_AUTH_TOKEN_LEN:
+        return False, f"too short (need at least {_MIN_AUTH_TOKEN_LEN} chars)"
+    classes = ((1 if any(c.islower() for c in tok) else 0)
+             + (1 if any(c.isupper() for c in tok) else 0)
+             + (1 if any(c.isdigit() for c in tok) else 0)
+             + (1 if any(not c.isalnum() for c in tok) else 0))
+    if classes < 2:
+        return False, "low entropy (need at least two character classes — letters + digits or symbols)"
+    if len(set(tok)) < 8:
+        return False, "low entropy (fewer than 8 distinct characters)"
+    return True, ""
+
+
 def main(argv=None):
+    # Load the env file BEFORE argparse so --auth-token can take its default from
+    # $VOICEPIPE_AUTH_TOKEN as written in ~/.config/voicepipe/env. (The argparse `default=`
+    # expression is evaluated at parse time; we previously ran the file-load after that, which
+    # silently lost env-file tokens whose value was set there and nowhere else.)
+    _load_env_file()
     ap = argparse.ArgumentParser(prog="voicepipe serve", description="run the voicepipe control server + web GUI")
     ap.add_argument("--host", default="127.0.0.1", help="bind host (default 127.0.0.1; use 0.0.0.0 for remote)")
     ap.add_argument("--port", type=int, default=8765)
@@ -803,12 +976,9 @@ def main(argv=None):
     ap.add_argument("--root", action="append", default=None, help="project root to scan (repeatable). Default: cwd, ~/voicepipe-projects, ./projects, ./scratch")
     ap.add_argument("--no-browser", action="store_true", help="don't try to open a browser")
     args = ap.parse_args(argv if argv is not None else sys.argv[1:])
-    _load_env_file()   # ~/.config/voicepipe/env -> os.environ (OLLAMA_API_KEY, VOICEPIPE_AUTH_TOKEN, ...)
     _start_parent_watchdog()                           # exit if the desktop-shell parent dies (if VOICEPIPE_PARENT_PID set)
     if args.no_auth:
         args.auth_token = None                         # the native app passes --no-auth; ignore any ambient token
-    elif args.auth_token is None:                      # the argparse default read env before the file load
-        args.auth_token = os.environ.get("VOICEPIPE_AUTH_TOKEN")
 
     _seed_registry_from_repo()                          # dev checkout: keep projects/ and scratch/ visible (no-op when packaged)
     roots = _resolve_roots(args.root)
@@ -819,6 +989,13 @@ def main(argv=None):
     if (not over_uds) and (not is_loopback) and (not args.auth_token) and (not args.no_auth):
         raise SystemExit("binding a non-loopback host requires --auth-token (or $VOICEPIPE_AUTH_TOKEN), "
                          "or pass --no-auth if you really mean to expose it unauthenticated")
+    # When we're putting auth in front of network-reachable traffic, the token has to actually be
+    # a token. Refuse short/low-entropy values rather than silently rubber-stamping them.
+    if (not over_uds) and (not is_loopback) and args.auth_token:
+        ok, why = _token_looks_strong(args.auth_token)
+        if not ok:
+            raise SystemExit(f"--auth-token is {why}. Use at least {_MIN_AUTH_TOKEN_LEN} chars "
+                             f"with mixed character classes — e.g. `python -c \"import secrets; print(secrets.token_urlsafe(32))\"`.")
     if auth_required:
         print("[serve] auth ENABLED — clients must present the token")
     elif over_uds:
@@ -826,7 +1003,8 @@ def main(argv=None):
     elif args.no_auth:
         print("[serve] --no-auth — auth disabled")
 
-    app = create_app(roots, auth_token=args.auth_token, auth_required=auth_required)
+    app = create_app(roots, auth_token=args.auth_token, auth_required=auth_required,
+                     bind_host=None if over_uds else args.host)
 
     try:
         import uvicorn
@@ -836,11 +1014,31 @@ def main(argv=None):
     # Use pure-Python uvicorn internals (asyncio loop, h11 parser) — negligible perf cost for a
     # localhost control server, and it sidesteps the uvloop/httptools C-extension headaches when
     # this is run from a PyInstaller-frozen bundle (the desktop sidecar).
+    # uvicorn installs its own SIGINT/SIGTERM handlers and runs the FastAPI "shutdown" event
+    # before exiting, which is where we kill child stage subprocesses (see _kill_children in
+    # create_app). No extra signal handler needed here.
     _uv = dict(log_level="info", loop="asyncio", http="h11")
     if over_uds:
-        sock = Path(args.unix_socket)
-        if sock.exists():
-            sock.unlink()
+        sock = Path(args.unix_socket).resolve()
+        # Ensure the parent directory exists and is mode 0700 — anything in it (incl. the socket
+        # we're about to bind) inherits the directory's access control as a baseline. We assume
+        # the parent dir is owned by the current user; for a system path like /run/foo/, the
+        # system administrator is responsible for that.
+        sock.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(sock.parent, 0o700)
+        except OSError:
+            print(f"[serve] warning: couldn't chmod 0700 {sock.parent} — UDS may be world-accessible",
+                  file=sys.stderr)
+        # umask 0o077 -> the socket file itself will be created mode 0600. There is a small
+        # TOCTOU between unlink and bind; uvicorn handles the bind, and the parent dir's 0700
+        # mode is the real access control here.
+        os.umask(0o077)
+        if sock.exists() or sock.is_symlink():
+            try:
+                sock.unlink()
+            except OSError as e:
+                raise SystemExit(f"couldn't remove stale socket {sock}: {e}")
         print(f"[serve] listening on unix:{sock}")
         uvicorn.run(app, uds=str(sock), **_uv)
     else:
