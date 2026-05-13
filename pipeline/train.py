@@ -49,8 +49,8 @@ import torch
 import transformers
 from datasets import Dataset
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
-from trl import SFTConfig, SFTTrainer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TrainerCallback
+from trl import DataCollatorForCompletionOnlyLM, SFTConfig, SFTTrainer
 
 from pipeline import events
 
@@ -65,7 +65,22 @@ class _EventsCallback(TrainerCallback):
         events.progress(current=state.global_step, total=(state.max_steps or None), unit="steps")
 
 # transformers 5.x renamed the from_pretrained dtype kwarg: torch_dtype -> dtype.
+# Brittle for dev/RC versions ("5.0.0.dev0") but split-and-int handles those; truly exotic
+# version strings would raise — that's an acceptable failure mode for a build-time pin.
 _DTYPE_KWARG = "dtype" if int(transformers.__version__.split(".")[0]) >= 5 else "torch_dtype"
+
+
+def _is_quantized_4bit(model) -> bool:
+    """Return True if `model` actually has bitsandbytes 4-bit layers installed."""
+    qc = getattr(getattr(model, "config", None), "quantization_config", None)
+    if qc is not None:
+        if getattr(qc, "load_in_4bit", False):
+            return True
+        # dict form on some transformers versions
+        if isinstance(qc, dict) and qc.get("load_in_4bit"):
+            return True
+    cls_names = {type(m).__name__ for _, m in model.named_modules()}
+    return "Linear4bit" in cls_names
 
 
 def _load_jsonl(p: Path):
@@ -73,22 +88,49 @@ def _load_jsonl(p: Path):
 
 
 def load_base_model(model_name: str):
-    """Load a 4-bit base model for QLoRA. See module docstring for the three shapes handled."""
+    """Load a 4-bit base model for QLoRA. See module docstring for the three shapes handled.
+
+    The primary (transformers) path passes an explicit BitsAndBytesConfig so the model is
+    quantized at load time even when `model_name` is not a pre-quantized repo (e.g. someone
+    passes `mistralai/Mistral-Nemo-Instruct-2407` instead of the `unsloth/...-bnb-4bit` mirror).
+    Without this, that mistake silently loads full bf16 and OOMs.
+    """
+    bnb = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+    )
+    primary_err = None
     try:
         model = AutoModelForCausalLM.from_pretrained(
-            model_name, device_map={"": 0}, **{_DTYPE_KWARG: torch.bfloat16}, trust_remote_code=True,
+            model_name, device_map={"": 0}, quantization_config=bnb,
+            **{_DTYPE_KWARG: torch.bfloat16}, trust_remote_code=True,
         )
         print(f"[model] loaded {model_name} via AutoModelForCausalLM")
+        if not _is_quantized_4bit(model):
+            raise RuntimeError(
+                f"loaded {model_name} but the model has no bitsandbytes 4-bit layers — "
+                f"bitsandbytes import probably failed silently, or the model architecture "
+                f"isn't supported by bnb. Refusing to continue (full-precision training would OOM)."
+            )
         return model
     except (ValueError, KeyError, OSError, RuntimeError) as e:
+        primary_err = e
         print(f"[model] AutoModelForCausalLM failed ({type(e).__name__}: {e}); trying multimodal path")
 
     try:
         from transformers import AutoModelForImageTextToText
         mm = AutoModelForImageTextToText.from_pretrained(
-            model_name, device_map={"": 0}, **{_DTYPE_KWARG: torch.bfloat16}, trust_remote_code=True,
+            model_name, device_map={"": 0}, quantization_config=bnb,
+            **{_DTYPE_KWARG: torch.bfloat16}, trust_remote_code=True,
         )
         print(f"[model] loaded {model_name} via AutoModelForImageTextToText (full multimodal wrapper)")
+        if not _is_quantized_4bit(mm):
+            raise RuntimeError(
+                f"loaded multimodal {model_name} but no bitsandbytes 4-bit layers present; "
+                f"refusing to continue."
+            )
         return mm
     except Exception as e:
         print(f"[model] multimodal path also failed ({type(e).__name__}: {e})")
@@ -106,7 +148,7 @@ def load_base_model(model_name: str):
         print(f"[model] unsloth path also failed ({type(e).__name__}: {e})")
 
     raise RuntimeError(
-        f"Could not load {model_name} via any path. "
+        f"Could not load {model_name} via any path (primary error: {primary_err}). "
         f"If this is a multimodal model, `pip install unsloth` in the venv and rerun."
     )
 
@@ -167,7 +209,10 @@ def main():
     ap.add_argument("--lora-dropout", type=float, default=None)
     ap.add_argument("--max-seq-len", type=int, default=None)
     ap.add_argument("--optim", default=None)
-    ap.add_argument("--resume-adapter", default=None, help="continue training an existing LoRA adapter dir")
+    ap.add_argument("--resume-adapter", default=None, help="continue training an existing LoRA adapter dir (weights only — discards optimizer/scheduler/RNG state)")
+    ap.add_argument("--resume-from-checkpoint", default=None,
+                    help="resume optimizer+scheduler+RNG state from a Trainer checkpoint dir; "
+                         "pass 'auto' to pick the latest out_dir/checkpoint-* automatically")
     ap.add_argument("--smoke", action="store_true", help="10-step dry run: tiny subset, verifies load + GPU + pipeline")
     args = ap.parse_args()
     events.set_stage("train")
@@ -189,6 +234,7 @@ def main():
                 "batch_size": cfg["batch_size"], "grad_accum": cfg["grad_accum"], "epochs": cfg["epochs"],
                 "lr": cfg["lr"], "optim": cfg["optim"], "smoke": bool(args.smoke),
                 "gpu": args.gpu, "resume_adapter": args.resume_adapter,
+                "resume_from_checkpoint": args.resume_from_checkpoint,
                 "device": torch.cuda.get_device_name(0)},
         inputs=[str(cfg["train_jsonl"]), str(cfg["val_jsonl"])], outputs=[str(cfg["out_dir"])])
 
@@ -225,15 +271,63 @@ def main():
 
         train_rows = _load_jsonl(cfg["train_jsonl"])
         val_rows = _load_jsonl(cfg["val_jsonl"])
+        if not train_rows:
+            raise RuntimeError(
+                f"no training rows in {cfg['train_jsonl']} — did `assemble` run? "
+                f"(expected one {{\"messages\": [...]}} per line)"
+            )
         if args.smoke:
             train_rows, val_rows = train_rows[:20], val_rows[:5]
         print(f"[data]  loaded train={len(train_rows)} val={len(val_rows)}")
 
         train_ds = Dataset.from_list(train_rows).map(to_text, remove_columns=list(train_rows[0].keys()))
-        val_ds = Dataset.from_list(val_rows).map(to_text, remove_columns=list(val_rows[0].keys()))
+        val_ds = (Dataset.from_list(val_rows).map(to_text, remove_columns=list(val_rows[0].keys()))
+                  if val_rows else None)
+
+        # Label-mask everything up to (and including) the assistant header so loss is computed
+        # only on assistant tokens. Mistral / Mistral-Nemo's chat template ends the user turn
+        # with `[/INST]`; we look for that exact string in the templated text. For other
+        # tokenizers we try a small set of well-known headers; if none match, SFTTrainer would
+        # silently compute loss on prompt tokens too — so we fail loudly instead.
+        response_template = None
+        sample_text = train_ds[0]["text"]
+        for candidate in ("[/INST]", "<|start_header_id|>assistant<|end_header_id|>\n\n",
+                          "<|im_start|>assistant\n", "<start_of_turn>model\n"):
+            if candidate in sample_text:
+                response_template = candidate
+                break
+        if response_template is None:
+            raise RuntimeError(
+                "could not locate an assistant-turn boundary in the chat-templated text "
+                "(tried Mistral [/INST], Llama 3, ChatML, Gemma). Add this tokenizer's "
+                "response template to pipeline/train.py."
+            )
+        collator = DataCollatorForCompletionOnlyLM(response_template=response_template, tokenizer=tok)
+        print(f"[mask]  response_template={response_template!r} (loss on assistant tokens only)")
+
+        # bf16 requires Ampere or newer (sm_80+). On Turing/Volta/T4/P100, fall back to fp16.
+        # Mutually-exclusive: TrainingArguments rejects both.
+        use_bf16 = bool(torch.cuda.is_available() and torch.cuda.is_bf16_supported())
+        use_fp16 = bool(torch.cuda.is_available() and not use_bf16)
+        print(f"[prec]  bf16={use_bf16} fp16={use_fp16}")
 
         out_dir = cfg["out_dir"]
         out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Pick a resume-from-checkpoint target: explicit path, 'auto' (latest checkpoint-*), or None.
+        resume_target = None
+        if args.resume_from_checkpoint:
+            if args.resume_from_checkpoint == "auto":
+                ckpts = sorted(out_dir.glob("checkpoint-*"),
+                               key=lambda p: int(p.name.rsplit("-", 1)[-1]) if p.name.rsplit("-", 1)[-1].isdigit() else -1)
+                resume_target = str(ckpts[-1]) if ckpts else None
+                if resume_target:
+                    print(f"[resume] auto-detected latest checkpoint: {resume_target}")
+                else:
+                    print(f"[resume] --resume-from-checkpoint=auto: no checkpoint-* in {out_dir}, starting fresh")
+            else:
+                resume_target = args.resume_from_checkpoint
+
         sft = SFTConfig(
             output_dir=str(out_dir),
             num_train_epochs=1 if args.smoke else cfg["epochs"],
@@ -249,19 +343,21 @@ def main():
             dataset_text_field="text",
             logging_steps=5,
             save_strategy="epoch" if not args.smoke else "no",
-            eval_strategy="epoch" if not args.smoke else "no",
-            bf16=True,
+            eval_strategy=("epoch" if (not args.smoke and val_ds is not None) else "no"),
+            bf16=use_bf16,
+            fp16=use_fp16,
             gradient_checkpointing=True,
             optim=cfg["optim"],
             report_to="none",
             seed=cfg["seed"],
         )
         trainer = SFTTrainer(model=model, args=sft, train_dataset=train_ds, eval_dataset=val_ds,
-                             processing_class=tok, callbacks=[_EventsCallback()])
+                             processing_class=tok, data_collator=collator,
+                             callbacks=[_EventsCallback()])
 
-        print("[train] starting...")
+        print("[train] starting..." + (f" (resume_from_checkpoint={resume_target})" if resume_target else ""))
         events.phase("train")
-        train_result = trainer.train()
+        train_result = trainer.train(resume_from_checkpoint=resume_target) if resume_target else trainer.train()
 
         if not args.smoke:
             events.phase("save")
