@@ -1,11 +1,13 @@
 # systemd unit for the WEB-ONLY voicepipe deployment (the desktop app does NOT use this — it
 # spawns its own loopback sidecar). Bound to a host:port with an auth token; reach it in a
-# browser. Adjust the User, paths, host, and Environment lines, then:
+# browser. `deploy/install-web.sh` substitutes the @PLACEHOLDER@ tokens; if you're copying this
+# unit by hand, replace them yourself, then:
 #   sudo cp deploy/voicepipe.service /etc/systemd/system/voicepipe.service
 #   sudo systemctl daemon-reload && sudo systemctl enable --now voicepipe
 #
 # The auth token MUST be set for any non-loopback --host (the server refuses to start otherwise).
-# Generate one: `openssl rand -hex 24`. Put it in /etc/voicepipe/env (mode 600), not here.
+# Generate one: `openssl rand -hex 24`. Put it in /etc/voicepipe/env (mode 640, root:voicepipe),
+# not here.
 
 [Unit]
 Description=voicepipe — corpus-to-character pipeline (web UI + control API)
@@ -14,17 +16,34 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=voicepipe
-Group=voicepipe
-WorkingDirectory=/opt/voicepipe
-# the venv that has `pip install -e .[gui]` (and [train]/[deploy] if this box also trains):
+User=@SVC_USER@
+Group=@SVC_USER@
+WorkingDirectory=@STATE_DIR@
 EnvironmentFile=/etc/voicepipe/env
-ExecStart=/opt/voicepipe/.venv/bin/voicepipe serve --host 0.0.0.0 --port 8765 --auth-token ${VOICEPIPE_AUTH_TOKEN} --root /opt/voicepipe/projects
+ExecStart=@PREFIX@/.venv/bin/voicepipe serve --host @HOST@ --port @PORT@ --auth-token ${VOICEPIPE_AUTH_TOKEN} --root @STATE_DIR@/projects
 Restart=on-failure
 RestartSec=5
-# the projects/ tree, ~/.config/voicepipe, and HF/Ollama caches need to be writable:
-ProtectSystem=full
+
+# Sandboxing — the service only needs to read code in @PREFIX@ and read/write state in @STATE_DIR@.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
 NoNewPrivileges=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=@STATE_DIR@
 
 [Install]
 WantedBy=multi-user.target

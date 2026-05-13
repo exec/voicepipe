@@ -24,10 +24,13 @@ Both are public ollama tags — `ollama run <name>` to talk to either:
 
 **Desktop app** (recommended): grab the build for your OS (macOS `.dmg`, Windows `.msi`, Linux
 `.AppImage`/`.deb`) from the releases page, open it, and configure + run the pipeline in the
-window. It's self-contained — no Python or other setup needed. (macOS: it's not yet
-notarized, so the first launch needs right-click → Open, or `xattr -dr com.apple.quarantine
-/Applications/voicepipe.app`.) On first run, open **Settings** (bottom-left of the sidebar) and
-paste your **Ollama Cloud API key** — synthesis, triage, and the category proposer need it.
+window. It's self-contained — no Python or other setup needed. (macOS: the build is currently
+unsigned; notarization is on the roadmap. As a workaround you can either (a) run `xattr -dr
+com.apple.quarantine /Applications/voicepipe.app` after first launch — note that path translocation
+of an unsigned `.app` with a nested Mach-O sidecar can still break bundled-Python path resolution,
+and the quarantine attribute may return after macOS updates — or (b) build from source, see below.)
+On first run, open **Settings** (bottom-left of the sidebar) and paste your **Ollama Cloud API
+key** — synthesis, triage, and the category proposer need it.
 
 **Or from source** (also gives you the CLI):
 
