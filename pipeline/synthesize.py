@@ -132,8 +132,10 @@ def parse_jsonl_response(text: str) -> list[dict]:
             continue
         if _is_valid_pair(obj):
             pairs.append(obj)
+    # If JSONL caught roughly everything that *looked* like a pair (at least half of the
+    # occurrences of `"messages"` — each well-formed pair contains exactly one such key,
+    # so `count // 2` is a deliberately loose floor), accept what we got and move on.
     if pairs and len(pairs) >= cleaned.count('"messages"') // 2:
-        # Strategy 1 caught roughly everything — return early.
         return pairs
     if pairs:
         # JSONL only got part of them; clear and let strategy 2 try the full text.
@@ -469,8 +471,12 @@ def main():
                     pairs_done += got
                     target_remaining -= got
                     batches_completed += 1
+                    # Disk count (pairs_done) is allowed to exceed target — slight over-parse is fine
+                    # and re-runnable. The progress event payload is capped at target so the UI's
+                    # bar doesn't read >100%.
+                    pairs_kept_against_target = min(pairs_done, proj.synthesis.target)
                     print(f"  [progress] {pairs_done}/{proj.synthesis.target}")
-                    events.progress(current=pairs_done, total=proj.synthesis.target, unit="pairs",
+                    events.progress(current=pairs_kept_against_target, total=proj.synthesis.target, unit="pairs",
                                     detail=f"batch {result['plan']['batch_id']} mode={result['plan']['mode'].name} parsed {got}/{result['plan']['n']}")
                     if target_remaining > 0:
                         plan = next_plan()

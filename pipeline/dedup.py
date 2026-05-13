@@ -109,10 +109,26 @@ def _embed(texts: list, model: str, base_url: str) -> list:
     import requests
     url = base_url.rstrip("/") + "/api/embed"
     out = []
+    backoffs = (1.0, 3.0, 9.0)  # 3 attempts: immediate, then 1s, 3s, 9s waits before each retry
     for i in range(0, len(texts), 64):
-        r = requests.post(url, json={"model": model, "input": texts[i:i + 64]}, timeout=180)
-        r.raise_for_status()
-        out.extend(r.json()["embeddings"])
+        batch = texts[i:i + 64]
+        last_err: Exception | None = None
+        for attempt in range(len(backoffs) + 1):
+            try:
+                r = requests.post(url, json={"model": model, "input": batch}, timeout=180)
+                r.raise_for_status()
+                out.extend(r.json()["embeddings"])
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                if attempt < len(backoffs):
+                    wait = backoffs[attempt]
+                    print(f"[embed] batch {i}-{i+len(batch)} attempt {attempt+1} failed ({e}); "
+                          f"retrying in {wait}s")
+                    time.sleep(wait)
+        if last_err is not None:
+            raise last_err
     return out
 
 
@@ -127,12 +143,18 @@ def cosine_dedup(pairs: list, threshold: float, embed_model: str, embed_base_url
     try:
         embs = _embed(texts, embed_model, embed_base_url)
     except Exception as e:
-        print(f"[warn] embedding failed ({e}); skipping cosine dedup")
+        # loud: cosine dedup is silently disabled when the embed endpoint is unreachable; the
+        # rest of the pipeline still runs but the output will contain near-duplicates.
+        msg = f"embedding endpoint failed after retries ({e}); SKIPPING cosine dedup — output will retain near-duplicates"
+        print(f"[ERROR] {msg}", file=sys.stderr)
+        events.log(msg, level="error")
         return pairs
     embs = np.array(embs, dtype=np.float32)
     norms = np.linalg.norm(embs, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
     embs = embs / norms
+    # TODO: O(N^2) with per-iteration np.stack — fine up to ~20k pairs; for larger runs,
+    # batch with FAISS or compute a Jaccard pre-filter to shrink candidate set.
     kept_idx, kept_embs = [], []
     for i in range(len(pairs)):
         if not kept_embs:
