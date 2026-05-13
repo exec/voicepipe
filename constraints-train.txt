@@ -8,6 +8,19 @@
 #
 # (torch is installed separately from the PyTorch cu128 index, then constrained here so nothing
 # else drags in a different build.)
+#
+# ---------------------------------------------------------------------------
+# Ada / Ampere fallback (cu121): RTX 30-series (sm_86) and RTX 40-series (sm_89) don't need
+# cu128 wheels. Substitute the cu121 torch wheel and keep the rest of these pins as-is — the
+# transformers/peft/trl/bitsandbytes versions below are cu-agnostic and have been verified
+# against torch 2.5.1+cu121:
+#
+#   pip install --index-url https://download.pytorch.org/whl/cu121 torch==2.5.1
+#   pip install -e .[train] -c constraints-train.txt   # (omit the torch line below, or override)
+#
+# Without that explicit torch step, pip will install a default-index torch and drag in newer
+# transformers/peft/trl wheels that may break the bnb cascade. Pin torch first, always.
+# ---------------------------------------------------------------------------
 torch==2.11.0
 transformers==4.50.0
 tokenizers==0.21.4

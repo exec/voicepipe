@@ -16,6 +16,8 @@ Usage:
 """
 
 import argparse
+import json
+import re
 import subprocess
 import sys
 import time
@@ -25,15 +27,46 @@ from pathlib import Path
 from pipeline import events
 
 
+def _slug(name: str) -> str:
+    """Filename-safe slug for project names. `"Oscar Wilde"` -> `"oscar-wilde"`. Never empty."""
+    s = re.sub(r"[^A-Za-z0-9._-]+", "-", name or "").strip("-").lower()
+    return s or "model"
+
+
 def _modelfile_text(deploy_cfg, gguf_path: Path) -> str:
+    """Render Ollama Modelfile text. Triple-quote-safe SYSTEM body and JSON-quoted stop strings."""
     lines = [f"FROM {deploy_cfg.ollama_from}", f"ADAPTER {gguf_path}", ""]
     if deploy_cfg.system_message:
-        lines += [f'SYSTEM """{deploy_cfg.system_message}"""', ""]
+        # `SYSTEM """..."""` parsing breaks if the body itself contains `"""`. Escape any inner
+        # triple-quote runs by inserting a zero-width-ish backslash sequence; the rendered text
+        # remains visually identical to the model at inference time (Ollama strips the escapes).
+        safe = deploy_cfg.system_message.replace('"""', '\\"\\"\\"')
+        lines += [f'SYSTEM """{safe}"""', ""]
     for k, v in (deploy_cfg.parameters or {}).items():
         lines.append(f"PARAMETER {k} {v}")
     for s in (deploy_cfg.stop or []):
-        lines.append(f'PARAMETER stop "{s}"')
+        # json.dumps gives a properly-escaped double-quoted string; handles inner quotes,
+        # backslashes, control chars cleanly. Ollama's Modelfile parser accepts JSON-style strings.
+        lines.append(f"PARAMETER stop {json.dumps(s)}")
     return "\n".join(lines) + "\n"
+
+
+def _push_with_retry(tag: str, attempts: int = 3, backoffs=(5, 20, 60)) -> None:
+    """`ollama push` with exponential backoff. Push is idempotent + resumable, so retrying
+    is safe — the server picks up where it left off."""
+    last_err = None
+    for i in range(attempts):
+        try:
+            subprocess.run(["ollama", "push", tag], check=True)
+            return
+        except subprocess.CalledProcessError as e:
+            last_err = e
+            if i < attempts - 1:
+                delay = backoffs[i] if i < len(backoffs) else backoffs[-1]
+                print(f"[deploy] ollama push attempt {i+1}/{attempts} failed "
+                      f"(rc={e.returncode}); retrying in {delay}s", file=sys.stderr)
+                time.sleep(delay)
+    raise last_err
 
 
 def main():
@@ -63,7 +96,19 @@ def main():
         print(msg, file=sys.stderr)
         events.stage_end(status="error", exit_code=2, error=msg)
         return 2
-    llama_cpp = Path(args.llama_cpp_dir or dc.llama_cpp_dir or "").expanduser()
+    raw_llama = args.llama_cpp_dir or dc.llama_cpp_dir or ""
+    if not raw_llama or not str(raw_llama).strip():
+        msg = ("llama_cpp_dir is not set — pass --llama-cpp-dir or set project [deploy].llama_cpp_dir "
+               "to a llama.cpp checkout containing convert_lora_to_gguf.py")
+        print(msg, file=sys.stderr)
+        events.stage_end(status="error", exit_code=2, error=msg)
+        return 2
+    llama_cpp = Path(raw_llama).expanduser()
+    if not llama_cpp.is_dir():
+        msg = f"llama_cpp_dir {llama_cpp} is not a directory — pass --llama-cpp-dir or fix project [deploy].llama_cpp_dir"
+        print(msg, file=sys.stderr)
+        events.stage_end(status="error", exit_code=2, error=msg)
+        return 2
     convert_script = llama_cpp / "convert_lora_to_gguf.py"
     if not convert_script.is_file():
         msg = f"convert_lora_to_gguf.py not found at {convert_script} — pass --llama-cpp-dir"
@@ -73,14 +118,16 @@ def main():
 
     outdir = Path(args.outdir or proj.dataset_path("adapter")).resolve()
     outdir.mkdir(parents=True, exist_ok=True)
-    gguf_path = outdir / f"{proj.name}-adapter-{dc.gguf_outtype}.gguf"
+    name_slug = _slug(proj.name)
+    gguf_path = outdir / f"{name_slug}-adapter-{dc.gguf_outtype}.gguf"
+    modelfile_path = outdir / f"Modelfile.{name_slug}"
 
     started_at = time.monotonic()
     events.stage_start(command=[sys.executable, "-m", "pipeline.deploy"] + sys.argv[1:],
                        params={"ollama_from": dc.ollama_from, "ollama_tag": tag, "gguf_outtype": dc.gguf_outtype,
                                "base_model_id_override": dc.base_model_id_override, "push": bool(args.push),
                                "dry_run": bool(args.dry_run)},
-                       inputs=[str(adapter)], outputs=[str(gguf_path), str(outdir / f"Modelfile.{proj.name}")])
+                       inputs=[str(adapter)], outputs=[str(gguf_path), str(modelfile_path)])
     try:
         # 1. convert
         cmd = [sys.executable, str(convert_script), str(adapter),
@@ -93,7 +140,6 @@ def main():
         events.artifact(gguf_path, kind="gguf", bytes=gguf_path.stat().st_size if gguf_path.is_file() else None)
 
         # 2. Modelfile
-        modelfile_path = outdir / f"Modelfile.{proj.name}"
         modelfile_path.write_text(_modelfile_text(dc, gguf_path), encoding="utf-8")
         print(f"[deploy] wrote {modelfile_path}")
         events.artifact(modelfile_path, kind="modelfile")
@@ -111,7 +157,7 @@ def main():
         if args.push:
             print(f"[deploy] ollama push {tag}")
             events.phase("ollama_push")
-            subprocess.run(["ollama", "push", tag], check=True)
+            _push_with_retry(tag)
         print(f"[deploy] done — {tag}")
         events.stage_end(status="ok", exit_code=0, duration_sec=time.monotonic() - started_at,
                          summary={"tag": tag, "gguf": str(gguf_path), "created": True, "pushed": bool(args.push)})
