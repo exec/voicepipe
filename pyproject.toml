@@ -5,18 +5,41 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "voicepipe"
 version = "0.1.0"
-license = { file = "LICENSE" }
 description = "Corpus-to-character pipeline: synthesize a fine-tuning dataset in a target voice, dedup it, triage it, assemble it, train a QLoRA adapter, and deploy via Ollama."
+readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing :: Linguistic",
+]
 dependencies = [
     "requests>=2.31",
     "numpy>=1.24",
 ]
 
+[project.urls]
+Homepage = "https://github.com/execxd/voicepipe"
+Source = "https://github.com/execxd/voicepipe"
+Issues = "https://github.com/execxd/voicepipe/issues"
+
 [project.optional-dependencies]
 # `pip install -e .[train]` on the training box (a CUDA GPU)
 train = [
     "torch>=2.4",
+    # TODO: upper-bound `transformers` once we've confirmed a working ceiling for the QLoRA stack.
     "transformers>=4.45",
     "datasets>=2.20",
     "peft>=0.12",
@@ -33,6 +56,7 @@ serve = [
 gui = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
+    "python-multipart>=0.0.9",
 ]
 # `pip install -e .[deploy]` for GGUF conversion (needs a llama.cpp checkout too)
 deploy = [

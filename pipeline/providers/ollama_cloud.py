@@ -125,23 +125,3 @@ class OllamaCloudClient:
                 yield chunk["message"]["content"]
             if chunk.get("done"):
                 break
-
-
-# Convenience model names — current Ollama Cloud as of May 2026.
-# Verify availability with: curl https://ollama.com/api/tags -H "Authorization: Bearer $OLLAMA_API_KEY"
-MODELS = {
-    "synth_primary": "mistral-large-3:675b-cloud",  # heavy-hitter for style transfer
-    "synth_alt": "deepseek-v4-flash",                # fast fallback if mistral refuses or stalls
-    "triage": "deepseek-v4-pro",                     # thinking model, best for rating
-    "embed_local": "nomic-embed-text",               # run this one locally for dedup
-}
-
-
-if __name__ == "__main__":
-    # smoke test
-    c = OllamaCloudClient()
-    out = c.chat(
-        model=MODELS["synth_primary"],
-        messages=[{"role": "user", "content": "Say hello in exactly five words."}],
-    )
-    print("smoke test response:", out)

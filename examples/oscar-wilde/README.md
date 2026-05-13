@@ -23,6 +23,16 @@ prompts/
   modes/voice.md          the shared mode instruction (anchored differently per mode)
 ```
 
+## A note on the model aliases
+
+`project.toml` references **Ollama Cloud** model aliases — `mistral-large-3:675b-cloud` (synthesis,
+[synthesis] in the TOML) and `deepseek-v4-pro` (the LLM-judge under [triage]). They aren't
+placeholders: they're real hosted endpoints you reach by setting `OLLAMA_API_KEY=ollama_...` in
+your environment (or pasting the key into the GUI's Settings). To run synthesis/triage against a
+**local** provider instead (Ollama, vLLM, LM Studio, anything OpenAI-compatible), add a
+`[synthesis.provider]` / `[triage.provider]` block to `project.toml` — see the top-level README and
+`pipeline/providers/` for the shape. Everything else in this example stays the same.
+
 ## To run it yourself
 
 From the repo root, with the engine installed (`pip install -e ".[gui]"`) and

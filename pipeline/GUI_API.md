@@ -47,36 +47,56 @@ file under each project's `dataset/jobs/`.
 
 Base: `http://127.0.0.1:<port>/v1`. JSON in/out. All paths project-scoped where it makes sense.
 
+### Auth
+
+When the server is launched with `--auth-token` (required automatically for any non-loopback host;
+optional on `127.0.0.1`; bypassed entirely on a Unix socket), every `/v1/*` request must carry the
+token via **`Authorization: Bearer <token>`**. Two compatibility fallbacks remain: `X-Auth-Token:
+<token>` and a `vp_token` cookie. Tokens are never accepted on the query string except for the
+`?ticket=` short-lived form used by the SSE endpoint (see below).
+
+`GET /v1/health` is the one exempt path — it's reachable without auth so the UI can discover
+`auth_required` before prompting for credentials.
+
+Request bodies are **Pydantic-validated with `extra="forbid"`**: unknown keys yield `422` with an
+explanation. The schemas are `_ConfigPut`, `_NewProject`, `_FilePut`, `_RunStage` in
+`pipeline/server.py`; the per-project `PUT /v1/projects/{id}/config` body is the only free-form
+dict (round-tripped through `load_project` for validation instead).
+
 ### Projects
 
 | Method & path | Body / params | Returns |
 |---|---|---|
-| `GET /projects` | — | `[{id, name, path, description, last_modified}]` — `id` is a slug of the dir; `path` is absolute. Discovered by scanning a configurable set of roots (`~/voicepipe-projects`, `projects/`, `scratch/`). |
-| `POST /projects` | `{path}` (existing dir) or `{name, template?}` (scaffold a new one) | `{id, ...}`. Scaffold writes a minimal `project.toml`, empty `corpus/`, `seeds/`, `prompts/`. |
-| `GET /projects/{id}` | — | `{id, name, path, description, config, corpus_files, seed_count, dataset_state}`. `config` is the full resolved `Project` as JSON (text-reference fields resolved to their contents); `dataset_state` reports what artifacts exist (`raw: {batches, pairs}`, `dedup: {pairs}`, `triage: {scored, kept}`, `final: {train, val}`, `adapter: {has_gguf, has_modelfile}`). |
-| `PUT /projects/{id}/config` | the `Project` JSON (or a partial patch) | `{config}` — writes `project.toml` back. Long prose blocks (`synth_preamble`, mode descriptions, …) can be sent inline; the server decides whether to inline them in the TOML or spill them to `prompts/<field>.md` and reference by filename (mirrors how a human writes it). Validates by round-tripping through `load_project`. |
+| `GET /projects` | — | `[{id, name, path, description}]` (or `{..., error}` for a project whose `project.toml` fails to load — broken projects are listed, not hidden). `id` is a slug of the dir; `path` is absolute. Discovered by scanning a configurable set of roots (default: cwd + `~/voicepipe-projects`) plus an explicit registry file (`~/.config/voicepipe/registry.json`) for dirs outside the roots. |
+| `POST /projects` | `{path}` (existing dir) or `{name, description?, template?, parent_dir?}` (scaffold a new one) | `{id, ...}`. Scaffold writes a minimal `project.toml`, empty `corpus/`, `seeds/`, `prompts/`. `path` is refused unless it's under a configured project root, your home, or already on the registry. |
+| `GET /projects/{id}` | — | `{id, name, path, description, config, corpus_files, seed_count, dataset_state}`. `config` is the full resolved `Project` as JSON (text-reference fields resolved to their contents); `dataset_state` reports what artifacts exist (`raw: {batches, pairs}`, `dedup: {pairs}`, `triage: {scored, kept}`, `final: {train, val}`, `adapter: {has_adapter, has_gguf}`). |
+| `PUT /projects/{id}/config` | the `Project` JSON (or `{config: {...}}`) | `{config}` — writes `project.toml` back atomically (temp-write, validate via `load_project`, rename). Long prose blocks (`synth_preamble`, mode descriptions, …) are spilled to `prompts/<field>.md` and referenced by filename (mirrors how a human writes it). |
 | `GET /projects/{id}/files/{path}` | — | raw file contents (for the prose-block / corpus editors). |
-| `PUT /projects/{id}/files/{path}` | raw contents | writes it. |
-| `DELETE /projects/{id}` | `?delete_dataset=false` | unregister; optionally `rm -rf dataset/`. Never deletes `corpus/`/`seeds/`/`prompts/`. |
+| `PUT /projects/{id}/files/{path}` | `{content}` | writes it. Only `.md`/`.txt`/`.jsonl`/`.toml` are editable; max 1 MiB; paths under `dataset/` are refused (the engine owns that tree). |
+| `DELETE /projects/{id}` | `?purge=false` | unregister + hide from auto-rescan; with `?purge=true` the produced `dataset/` is `rm -rf`'d. `corpus/`/`seeds/`/`prompts/` are never deleted. |
 
 ### Stage runs (jobs)
 
 | Method & path | Body | Returns |
 |---|---|---|
 | `POST /projects/{id}/stages/{stage}/run` | `{overrides?: {...}, smoke?: bool, gpu?: int}` — `stage` ∈ `categorize\|synthesize\|dedup\|triage\|assemble\|train\|deploy\|eval`. `overrides` maps onto the stage's CLI flags (`{"max_seq_len": 4096}` → `--max-seq-len 4096`; `{"no_downsample": true}` → `--no-downsample`). | `201` `{job_id, stage, project, dir, command, pid, started_at, status:"running"}`. 409 if that stage is already running for this project. |
-| `GET /jobs` | `?project=&status=&limit=` | `[{job_id, project, stage, status, started_at, ended_at, exit_code}]`. |
-| `GET /jobs/{job_id}` | — | full record incl. the resolved command line, the last N log lines, the latest progress event, and the summary (once finished). |
-| `GET /jobs/{job_id}/events` | `?since=<seq>` | **SSE stream.** Replays every event with `seq > since` from the persisted log, then live-tails. `seq` is a monotonic per-job integer. Each SSE `data:` line is one event object (schema below). Closes when the job ends (after emitting `stage_end`). |
-| `GET /jobs/{job_id}/log` | `?tail=&from=` | the raw captured stdout+stderr (the human text the CLI prints), for a "show me the console" pane. |
-| `POST /jobs/{job_id}:cancel` | — | SIGTERM the process group, then SIGKILL after a grace period. Emits a `stage_end` with `status:"cancelled"`. |
+| `GET /jobs` | `?project=` | `[{job_id, project, stage, status, started_at, ended_at, exit_code}]`. `project` is the project id (slug); falls back to a literal path lookup. |
+| `GET /jobs/{job_id}` | — | full record incl. the resolved command line, the last 200 console lines, and the last 50 events. |
+| `GET /jobs/{job_id}/events` | `?since=<seq>` *(+ `?ticket=<one-shot>` when auth is required)* | **SSE stream.** Replays every event with `seq > since` from the persisted log, then live-tails. `seq` is a monotonic per-job integer. Each SSE `data:` line is one event object (schema below). Emits a terminal `event: end` and closes when the job ends. EventSource can't set headers, so this endpoint also accepts a `?ticket=` minted from `GET /v1/sse-ticket` (single-use, 30 s TTL). |
+| `GET /jobs/{job_id}/log` | `?tail=` | the raw captured stdout+stderr (the human text the CLI prints), for a "show me the console" pane. |
+| `POST /jobs/{job_id}/cancel` | — | SIGTERM the process group, then SIGKILL after a grace period. Emits a `stage_end` with `status:"cancelled"`. |
 
 ### Misc
 
 | Method & path | Returns |
 |---|---|
-| `GET /health` | `{ok, version, python, has_torch, has_ollama, llama_cpp_dir}` — what's installed where (the train/deploy extras may be absent on a laptop). |
-| `GET /providers` | the configured LLM providers (synthesis/triage models): `[{id, kind:"ollama_cloud"\|"openai"\|"anthropic"\|"local", base_url, models}]`. (Provider abstraction generalization is its own task; today this returns just the Ollama Cloud entry.) |
+| `GET /health` | `{ok, version, python, has_torch, has_ollama, ollama_api_key_set, auth_required, roots}` — liveness + what's installed where. The one path always reachable without auth. |
+| `GET /config` | `{project_roots, roots_are_default, ollama_api_key_set, llama_cpp_dir, config_file, env_file}` — user-level settings. `llama_cpp_dir` lives here (not in `/health`). |
+| `PUT /config` | `_ConfigPut`: `{project_roots?, llama_cpp_dir?, ollama_api_key?}`. `ollama_api_key` is persisted to `~/.config/voicepipe/env` at mode 0600; the others are written to `~/.config/voicepipe/config.json`. Unknown keys → 422. |
+| `GET /sse-ticket` | `{ticket, ttl_sec}` — mint a single-use SSE ticket (see jobs/events above). |
+| `GET /providers` | the configured LLM providers (synthesis/triage models): `[{id, kind, base_url, ready, note}]`. Currently reports the Ollama Cloud entry and a local-Ollama OpenAI-compatible entry. |
 | `GET /defaults` | the dataclass-default `Project` as JSON — the GUI uses it to render "unset → (default: X)" hints in the config editor. |
+| `GET /templates` | the bundled project scaffold templates. |
 
 ---
 
@@ -179,13 +199,17 @@ Every event has:
 ## Implementation notes (what shipped, vs. the sketch above)
 
 - **Stage-run path** is `POST /v1/projects/{id}/stages/{stage}/run` (not `…:run` — avoids the
-  colon-in-path routing wrinkle). Body: `{overrides?, smoke?, gpu?}`. Returns `201` with the job
-  meta. `eval`/`infer` runs work too (eval isn't `--project`-wired yet, so it'll mostly no-op).
+  colon-in-path routing wrinkle); cancel is likewise `POST /v1/jobs/{job_id}/cancel`. Body for
+  run: `{overrides?, smoke?, gpu?}` (Pydantic, `extra="forbid"`). Returns `201` with the job meta.
+  `eval`/`infer` runs work too (eval isn't `--project`-wired yet, so it'll mostly no-op).
 - **Auth** is a single shared token (`--auth-token` / `$VOICEPIPE_AUTH_TOKEN`). It's enforced on
   `/v1/*` and **only over TCP** — required automatically for any non-loopback `--host`, optional
   for `127.0.0.1`, and **bypassed entirely over a Unix socket** (`voicepipe serve --unix-socket
-  PATH`). EventSource can't set headers, so the SSE endpoint also accepts `?token=`. Static UI is
-  always served (so the login prompt can load); the UI stores the token in `localStorage`.
+  PATH`). Clients pass it as `Authorization: Bearer <token>` (compat fallbacks: `X-Auth-Token`
+  header, `vp_token` cookie). EventSource can't set headers, so SSE uses a short-lived single-use
+  ticket: `GET /v1/sse-ticket` → `?ticket=<value>` on the events URL (TTL 30 s). `GET /v1/health`
+  is auth-exempt so the UI can discover `auth_required` before prompting. Static UI is always
+  served (so the login prompt can load); the UI stores the token in `localStorage`.
 - **Config writes** (`PUT /v1/projects/{id}/config`): long prose (`synth_preamble`,
   `variety_menus`, `content_rules`, each mode's `description`, `triage.rubric`,
   `deploy.system_message`) is spilled to `prompts/*.md` and referenced by filename; everything

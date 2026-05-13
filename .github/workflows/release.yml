@@ -4,14 +4,18 @@
 #   macOS:   voicepipe_<v>_aarch64.dmg + voicepipe_<v>_x64.dmg + the .app
 #   Windows: voicepipe_<v>_x64_en-US.msi (+ NSIS .exe)
 #   Linux:   voicepipe_<v>_amd64.deb + voicepipe_<v>_amd64.AppImage
-# …attached to a GitHub Release. Each is self-contained (it bundles a PyInstaller build of the
-# voicepipe[gui] engine inside Resources/ — the [train]/[deploy] extras are NOT bundled).
+# ...attached to a GitHub Release. Each is self-contained (it bundles a PyInstaller build of the
+# voicepipe[gui] engine inside Resources/ -- the [train]/[deploy] extras are NOT bundled).
 #
 # Code signing / notarization (optional): set repo secrets and they get picked up automatically.
 #   macOS:   APPLE_CERTIFICATE (base64 .p12), APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
 #            APPLE_ID, APPLE_PASSWORD (app-specific), APPLE_TEAM_ID
 #   Windows: WINDOWS_CERTIFICATE (base64 .pfx), WINDOWS_CERTIFICATE_PASSWORD
 # Without them the build still runs; the artifacts are just unsigned (Gatekeeper/SmartScreen will warn).
+#
+# Third-party actions are pinned by commit SHA -- signing secrets are in scope, so a compromised
+# floating tag would be enough to exfiltrate them. The trailing comment carries the human-readable
+# version so Renovate/Dependabot can keep them current.
 #
 # Auto-updater (TODO): not wired yet. To enable: `cargo tauri signer generate`, put the public key
 # in tauri.conf.json `plugins.updater.pubkey` + an `endpoints` URL, add `tauri-plugin-updater`, set
@@ -38,34 +42,34 @@ jobs:
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
-      - name: Linux — Tauri system deps
+      - name: Linux -- Tauri system deps
         if: startsWith(matrix.os, 'ubuntu')
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev build-essential curl wget file
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with: { python-version: "3.12" }
 
       - name: Build the bundled engine (PyInstaller)
         shell: bash
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install pyinstaller
+          python -m pip install --upgrade "pip==26.1.1"
+          python -m pip install "pyinstaller==6.20.0"
           python -m pip install -e ".[gui]"
           # build-sidecar.sh uses ./.venv by default; point it at this CI Python instead.
           VENV="$(python -c 'import sys,os;print(os.path.dirname(os.path.dirname(sys.executable)))')" bash desktop/build-sidecar.sh
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable branch @ 2026-05
         with: { targets: "${{ matrix.target }}" }
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with: { workspaces: "desktop/src-tauri -> target" }
 
       - name: Build + bundle (Tauri)
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5  # action-v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # macOS signing/notarization (no-ops if the secrets are unset)
@@ -82,7 +86,7 @@ jobs:
           projectPath: desktop
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('v0.0.0-dev-{0}', github.run_number) }}
           releaseName: "voicepipe ${{ github.ref_type == 'tag' && github.ref_name || 'dev build' }}"
-          releaseBody: "Self-contained desktop app (engine bundled). macOS is unsigned unless a Developer ID secret is configured — first launch needs right-click → Open."
+          releaseBody: "Self-contained desktop app (engine bundled). macOS is unsigned unless a Developer ID secret is configured -- first launch needs right-click -> Open."
           releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.target }}
