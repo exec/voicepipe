@@ -1,7 +1,7 @@
 "use strict";
 /* voicepipe web UI — no innerHTML; all DOM built with createElement/textContent */
 
-const BUILD = "v11";
+const BUILD = "v12";
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -20,6 +20,9 @@ const el = (tag, attrs = {}, ...kids) => {
 const fmtNum = n => (n == null ? "—" : Number(n).toLocaleString());
 const STAGES = ["categorize", "synthesize", "dedup", "triage", "assemble", "train", "deploy"];
 
+// Personal-tool app: the token lives in localStorage so the user isn't re-prompted across tabs.
+// That's an accepted trade-off here. We do NOT put it in the URL (the SSE exception is handled
+// below via a single-use ticket fetched from /v1/sse-ticket).
 const State = {
   token: localStorage.getItem("vp_token") || "",
   engineBase: (localStorage.getItem("vp_engine") || "").replace(/\/+$/, ""),  // "" = this machine
@@ -423,7 +426,17 @@ async function selectJob(jobId) {
   (meta.events || []).forEach(handleEvent);
   if (meta.status === "running") {
     const since = (meta.events || []).slice(-1)[0]?.seq || 0;
-    const url = apiURL("/v1/jobs/" + encodeURIComponent(jobId) + "/events?since=" + since + (State.token ? "&token=" + encodeURIComponent(State.token) : ""));
+    // EventSource can't set headers, so we exchange the bearer token for a single-use,
+    // short-lived ticket (30s; consumed on first use) and put THAT in the query string.
+    // Documented exception — see /v1/sse-ticket in server.py.
+    let ticketParam = "";
+    if (State.authRequired) {
+      try {
+        const tk = await api("/v1/sse-ticket");
+        if (tk && tk.ticket) ticketParam = "&ticket=" + encodeURIComponent(tk.ticket);
+      } catch {}
+    }
+    const url = apiURL("/v1/jobs/" + encodeURIComponent(jobId) + "/events?since=" + since + ticketParam);
     const es = new EventSource(url); State.es = es;
     es.onmessage = ev => { try { handleEvent(JSON.parse(ev.data)); } catch {} };
     es.addEventListener("end", async () => {
