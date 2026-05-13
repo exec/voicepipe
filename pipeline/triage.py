@@ -19,6 +19,7 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
 import threading
 import time
@@ -49,6 +50,32 @@ def _format_batch(pairs: list, start_idx: int) -> str:
         lines.append(f"ASSISTANT: {p['messages'][1]['content']}")
         lines.append("")
     return "\n".join(lines)
+
+
+def _truncate_partial_tail(path) -> int:
+    """If `path` ends mid-line (no trailing newline), trim the trailing partial line in place.
+    Returns the number of bytes removed. Safe to call on a non-existent / empty file."""
+    from pathlib import Path as _Path
+    p = _Path(path)
+    if not p.is_file():
+        return 0
+    size = p.stat().st_size
+    if size == 0:
+        return 0
+    with p.open("rb") as f:
+        f.seek(-1, 2)
+        last = f.read(1)
+    if last == b"\n":
+        return 0
+    with p.open("rb") as f:
+        data = f.read()
+    nl = data.rfind(b"\n")
+    new_size = nl + 1 if nl >= 0 else 0
+    with p.open("rb+") as f:
+        f.truncate(new_size)
+    removed = size - new_size
+    print(f"[resume] trimmed {removed} bytes of partial trailing line from {path}", file=sys.stderr)
+    return removed
 
 
 def _parse(text: str) -> list:
@@ -124,6 +151,10 @@ def main():
 
     done_ids = set()
     if scored_path.exists():
+        # If a previous run was SIGKILLed mid-append, the file may end in a partial line.
+        # Trim that tail before reopening for append so we don't concatenate a half-line
+        # with the next write.
+        _truncate_partial_tail(scored_path)
         for s in load_jsonl(scored_path):
             if "pair_id" in s:
                 done_ids.add(s["pair_id"])
@@ -176,10 +207,12 @@ def main():
                             print(f"[{completed}/{len(batches)}] batch@{bi[0]:>4}: parsed {len(scores)}/{len(bp)}")
                             for s in scores:
                                 sf.write(json.dumps(s) + "\n")
-                            sf.flush()
+                                sf.flush()
+                                os.fsync(sf.fileno())
                             af.write(json.dumps({"ts": datetime.now(timezone.utc).isoformat(),
                                                  "batch_size": len(bp), "scored": len(scores), "first_idx": bi[0]}) + "\n")
                             af.flush()
+                            os.fsync(af.fileno())
                         events.progress(current=progress_done + completed, total=total_batches, unit="batches",
                                         detail=f"batch @{bi[0]} parsed {len(scores)}/{len(bp)}")
             print(f"[triage] done. {total_scored} new scores across {completed} batches.")

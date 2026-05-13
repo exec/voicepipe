@@ -53,7 +53,8 @@ def main():
     ap.add_argument("--seeds", default=None, help="override path to seeds jsonl")
     ap.add_argument("--salvage", action="append", default=None, help="override salvage jsonl path(s); repeatable")
     ap.add_argument("--out-dir", default=None, help="override output dir")
-    ap.add_argument("--val-fraction", type=float, default=None)
+    ap.add_argument("--val-fraction", type=float, default=None,
+                    help="fraction of pairs reserved for val.jsonl (honored strictly; a stderr warning is emitted if the resulting val set is < 20 pairs)")
     ap.add_argument("--seed", type=int, default=None)
     args = ap.parse_args()
     events.set_stage("assemble")
@@ -98,7 +99,11 @@ def main():
     random.seed(seed)
     all_pairs = seeds + keeps + salvage
     random.shuffle(all_pairs)
-    n_val = max(50, int(len(all_pairs) * val_fraction)) if all_pairs else 0
+    n_val = int(len(all_pairs) * val_fraction) if all_pairs else 0
+    if all_pairs and 0 < n_val < 20:
+        print(f"[assemble] warning: n_val={n_val} (< 20) from val_fraction={val_fraction} "
+              f"on {len(all_pairs)} pairs; dataset may be too small for a meaningful eval split",
+              file=sys.stderr)
     val, train = all_pairs[:n_val], all_pairs[n_val:]
 
     def lens(rows):
