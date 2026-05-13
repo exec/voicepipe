@@ -1,0 +1,12 @@
+# {{NAME}} — voicepipe project (blank template; everything defaults — see pipeline/project.py)
+name = "{{NAME}}"
+description = "{{DESCRIPTION}}"
+
+# Put source texts in corpus/ , hand-written examples in seeds/seed_pairs.jsonl .
+# Add prose blocks (synth_preamble, content_rules, a triage rubric, a deploy system prompt) and
+# at least one [[modes]] block when you're ready — see the `character` template for a fleshed-out
+# example, or run `voicepipe serve` and edit in the GUI.
+
+[[modes]]
+name = "VOICE"
+weight = 1.0

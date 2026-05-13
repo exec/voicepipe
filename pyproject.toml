@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voicepipe"
+version = "0.1.0"
+license = { file = "LICENSE" }
+description = "Corpus-to-character pipeline: synthesize a fine-tuning dataset in a target voice, dedup it, triage it, assemble it, train a QLoRA adapter, and deploy via Ollama."
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+# `pip install -e .[train]` on the training box (a CUDA GPU)
+train = [
+    "torch>=2.4",
+    "transformers>=4.45",
+    "datasets>=2.20",
+    "peft>=0.12",
+    "trl>=0.11",
+    "accelerate>=0.34",
+    "bitsandbytes>=0.44",
+]
+# `pip install -e .[serve]` for the Discord front-end
+serve = [
+    "discord.py>=2.4",
+    "openai>=1.40",
+]
+# `pip install -e .[gui]` for the local control server + web GUI (`voicepipe serve`)
+gui = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
+# `pip install -e .[deploy]` for GGUF conversion (needs a llama.cpp checkout too)
+deploy = [
+    "gguf",
+    "safetensors",
+    "sentencepiece",
+]
+
+[project.scripts]
+voicepipe = "pipeline.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pipeline*"]
+
+[tool.setuptools.package-data]
+pipeline = ["webui/*", "templates/**/*"]

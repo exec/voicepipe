@@ -1,0 +1,1 @@
+Run `cargo tauri icon path/to/source-1024x1024.png` to populate this directory, or drop the standard Tauri icon set here (icon.png, icon.ico, icon.icns, *.png at various sizes). `cargo tauri build` requires icon.png at minimum.

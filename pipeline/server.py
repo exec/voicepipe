@@ -1,0 +1,859 @@
+"""
+voicepipe control server — a small local HTTP API + the web GUI, in front of the (unchanged)
+pipeline engine.
+
+Run it:
+    voicepipe serve                       # http://127.0.0.1:8765 , no auth (loopback)
+    voicepipe serve --host 0.0.0.0 --auth-token SECRET    # remote access, password-gated
+    voicepipe serve --unix-socket /run/voicepipe.sock     # no TCP port at all (auth bypassed)
+
+Design notes:
+  - The engine stays 100% the CLI. A stage run is a subprocess (`pipeline.jobs`); this process
+    never imports `pipeline.train` etc.
+  - Auth: a single shared token. Required on /v1/* when `--auth-token`/$VOICEPIPE_AUTH_TOKEN is
+    set OR when bound to a non-loopback host. Bypassed entirely on a Unix socket (the native
+    desktop app uses that path and is trusted by construction). The static UI is always served
+    so the login prompt can load.
+  - Projects are discovered by scanning "roots" (one level deep for a project.toml) plus an
+    explicit registry file (~/.config/voicepipe/registry.json) for dirs outside the roots.
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+import time
+from dataclasses import asdict
+from pathlib import Path
+
+try:
+    from fastapi import FastAPI, HTTPException, Request, Response
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse, FileResponse
+    from fastapi.staticfiles import StaticFiles
+except ImportError as e:  # pragma: no cover
+    raise SystemExit("the GUI server needs FastAPI + uvicorn — `pip install -e .[gui]`") from e
+
+from pipeline import jobs as jobsmod
+from pipeline import scaffold
+from pipeline.project import load_project, Project
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_WEBUI_DIR = Path(__file__).resolve().parent / "webui"
+_CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "voicepipe"
+_REGISTRY_FILE = _CONFIG_DIR / "registry.json"
+_CONFIG_FILE = _CONFIG_DIR / "config.json"      # { "project_roots": [ ... ] }
+_ENV_FILE = _CONFIG_DIR / "env"
+
+
+def _load_app_config() -> dict:
+    if _CONFIG_FILE.is_file():
+        try:
+            return json.loads(_CONFIG_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _save_app_config(cfg: dict) -> None:
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+
+def _default_roots() -> list[Path]:
+    """Where to look for projects when neither --root nor config.json says otherwise:
+    the launch directory (skipped if it's / or $HOME — too broad), plus ~/voicepipe-projects.
+    That's it. Anything else lives in the registry (created/opened projects) or config.json."""
+    out: list[Path] = []
+    cwd = Path.cwd().resolve()
+    if cwd not in (Path("/"), Path.home().resolve()):
+        out.append(cwd)
+    out.append(Path.home() / "voicepipe-projects")
+    return out
+
+
+def _seed_registry_from_repo() -> None:
+    """If we're running from a source checkout (the `pipeline` package's parent has projects/ or
+    scratch/ with project.toml dirs), register those once so they don't vanish from the list when
+    we stopped baking them into the defaults. No-op for a packaged install (no such dirs)."""
+    for sub in ("projects", "scratch"):
+        base = _REPO_ROOT / sub
+        if not base.is_dir():
+            continue
+        for child in base.iterdir():
+            if child.is_dir() and (child / "project.toml").is_file():
+                _register_path(child)
+
+
+def _resolve_roots(cli_roots: list | None) -> list[Path]:
+    """--root args win outright; otherwise config.json's project_roots, else the built-in defaults.
+    Plus dirs explicitly registered via the registry are always scanned (handled by Registry)."""
+    if cli_roots:
+        return [Path(r).expanduser().resolve() for r in cli_roots]
+    cfg_roots = _load_app_config().get("project_roots")
+    if cfg_roots:
+        return [Path(r).expanduser().resolve() for r in cfg_roots]
+    return [r.expanduser().resolve() for r in _default_roots()]
+
+
+def _start_parent_watchdog() -> None:
+    """If $VOICEPIPE_PARENT_PID is set (the desktop shell sets it), exit when that parent dies —
+    so a force-killed app never leaves the engine orphaned. No-op for a plain `voicepipe serve`."""
+    pp = os.environ.get("VOICEPIPE_PARENT_PID")
+    if not pp or not pp.isdigit():
+        return
+    parent = int(pp)
+    import threading, time as _t
+    def _watch():
+        while True:
+            _t.sleep(2)
+            if os.getppid() != parent:        # parent gone -> we got reparented (to launchd/init)
+                os._exit(0)
+    threading.Thread(target=_watch, daemon=True).start()
+
+
+def _load_env_file() -> None:
+    """Load `KEY=VALUE` lines from ~/.config/voicepipe/env into os.environ (without clobbering
+    anything already set). Same file the systemd unit reads via EnvironmentFile=. A handy place
+    for OLLAMA_API_KEY and VOICEPIPE_AUTH_TOKEN so `voicepipe serve` (and the stage subprocesses
+    it spawns) pick them up automatically."""
+    if not _ENV_FILE.is_file():
+        return
+    for line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        k, v = k.strip(), v.strip().strip('"').strip("'")
+        if k and k not in os.environ:
+            os.environ[k] = v
+
+
+def _set_env_file_var(key: str, value: str) -> None:
+    """Update or append `KEY=value` in ~/.config/voicepipe/env (preserving other lines/comments),
+    and set os.environ[key] so it takes effect for stage subprocesses spawned afterward. An empty
+    value removes the key."""
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    lines = _ENV_FILE.read_text(encoding="utf-8").splitlines() if _ENV_FILE.is_file() else [
+        "# voicepipe — loaded by `voicepipe serve` (and read by deploy/voicepipe.service via EnvironmentFile=)"
+    ]
+    out, found = [], False
+    for ln in lines:
+        s = ln.strip()
+        if s and not s.startswith("#") and s.split("=", 1)[0].strip() == key:
+            found = True
+            if value:
+                out.append(f"{key}={value}")
+            # else: drop the line
+        else:
+            out.append(ln)
+    if not found and value:
+        out.append(f"{key}={value}")
+    _ENV_FILE.write_text("\n".join(out) + "\n", encoding="utf-8")
+    try:
+        os.chmod(_ENV_FILE, 0o600)
+    except OSError:
+        pass
+    if value:
+        os.environ[key] = value
+    else:
+        os.environ.pop(key, None)
+
+# Fields whose (long) string value is spilled to prompts/<field>.md and referenced by filename
+# when the GUI writes a config — mirrors how a human authors project.toml.
+_SPILL_FIELDS = {"synth_preamble", "variety_menus", "content_rules"}
+_SPILL_THRESHOLD = 400  # chars; also spill anything containing a newline
+
+
+# --------------------------------------------------------------------------- registry / discovery
+
+def _load_registry() -> dict:
+    if _REGISTRY_FILE.is_file():
+        try:
+            return json.loads(_REGISTRY_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"paths": []}
+
+
+def _save_registry(reg: dict) -> None:
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _REGISTRY_FILE.write_text(json.dumps(reg, indent=2), encoding="utf-8")
+
+
+def _register_path(path: Path) -> None:
+    reg = _load_registry()
+    p = str(Path(path).resolve())
+    if p not in reg.get("paths", []):
+        reg.setdefault("paths", []).append(p)
+        _save_registry(reg)
+
+
+def _unregister_path(path: Path) -> None:
+    reg = _load_registry()
+    p = str(Path(path).resolve())
+    if p in reg.get("paths", []):
+        reg["paths"] = [x for x in reg["paths"] if x != p]
+        _save_registry(reg)
+
+
+def _unhide_project(path: Path) -> None:
+    """Reverse a DELETE /v1/projects (un-mask a project that was hidden from the list)."""
+    cfg = _load_app_config()
+    hidden = cfg.get("hidden_projects")
+    if not hidden:
+        return
+    p = str(Path(path).resolve())
+    if p in hidden:
+        cfg["hidden_projects"] = [x for x in hidden if x != p]
+        _save_app_config(cfg)
+
+
+def _slugify(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(s).lower()).strip("-") or "project"
+
+
+class Registry:
+    """Maps slug -> project dir. Rebuilt from the configured roots + the on-disk registry."""
+
+    def __init__(self, roots: list[Path]):
+        self.roots = [Path(r).expanduser().resolve() for r in roots]
+        self._slug_to_dir: dict[str, Path] = {}
+
+    def _discover_dirs(self) -> list[Path]:
+        seen: list[Path] = []
+        for root in self.roots:
+            if not root.is_dir():
+                continue
+            if (root / "project.toml").is_file():
+                seen.append(root)
+            for child in sorted(root.iterdir()):
+                if child.is_dir() and (child / "project.toml").is_file():
+                    seen.append(child)
+        for p in _load_registry().get("paths", []):
+            pp = Path(p)
+            if (pp / "project.toml").is_file():
+                seen.append(pp.resolve())
+        hidden = {Path(h).resolve() for h in _load_app_config().get("hidden_projects", [])}
+        # de-dupe preserving order, dropping anything explicitly hidden
+        out, known = [], set()
+        for p in seen:
+            rp = p.resolve()
+            if rp not in known and rp not in hidden:
+                known.add(rp)
+                out.append(rp)
+        return out
+
+    def refresh(self) -> list[Path]:
+        dirs = self._discover_dirs()
+        self._slug_to_dir = {}
+        for d in dirs:
+            base = _slugify(d.name)
+            slug = base
+            i = 2
+            while slug in self._slug_to_dir:
+                slug = f"{base}-{i}"
+                i += 1
+            self._slug_to_dir[slug] = d
+        return dirs
+
+    def dir_for(self, slug: str) -> Path:
+        if slug not in self._slug_to_dir:
+            self.refresh()
+        if slug not in self._slug_to_dir:
+            raise KeyError(slug)
+        return self._slug_to_dir[slug]
+
+    def slug_for(self, d: Path) -> str:
+        d = Path(d).resolve()
+        for slug, pd in self._slug_to_dir.items():
+            if pd.resolve() == d:
+                return slug
+        self.refresh()
+        for slug, pd in self._slug_to_dir.items():
+            if pd.resolve() == d:
+                return slug
+        return _slugify(d.name)
+
+    def all(self) -> list[tuple[str, Path]]:
+        self.refresh()
+        return sorted(self._slug_to_dir.items())
+
+
+# --------------------------------------------------------------------------- project serialization
+
+def _jsonable(v):
+    if isinstance(v, Path):
+        return str(v)
+    if isinstance(v, dict):
+        return {k: _jsonable(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_jsonable(x) for x in v]
+    return v
+
+
+def _project_config_dict(proj: Project) -> dict:
+    d = asdict(proj)
+    d.pop("root", None)
+    return _jsonable(d)
+
+
+def _dataset_state(proj: Project) -> dict:
+    def count_lines(p: Path) -> int:
+        try:
+            return sum(1 for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip())
+        except OSError:
+            return 0
+    dd = proj.dataset_path
+    raw_dir = dd("raw")
+    raw_batches = sorted(raw_dir.glob("batch_*.jsonl")) if raw_dir.is_dir() else []
+    state = {
+        "raw": {"batches": len(raw_batches),
+                "pairs": sum(count_lines(p) for p in raw_batches)},
+        "dedup": {"pairs": count_lines(dd("dedup", "pairs.jsonl"))},
+        "triage": {"scored": count_lines(dd("triage", "scored.jsonl")),
+                   "kept": count_lines(dd("triage", "keep.jsonl"))},
+        "final": {"train": count_lines(dd("final", "train.jsonl")),
+                  "val": count_lines(dd("final", "val.jsonl"))},
+        "adapter": {"has_adapter": (dd("adapter", "final").is_dir()),
+                    "has_gguf": bool(list(dd("adapter").glob("*.gguf"))) if dd("adapter").is_dir() else False},
+    }
+    return state
+
+
+def _project_summary(reg: Registry, d: Path) -> dict:
+    try:
+        proj = load_project(d)
+        name, desc = proj.name, proj.description
+    except Exception as e:  # noqa: BLE001 - report broken projects rather than failing the list
+        return {"id": reg.slug_for(d), "path": str(d), "name": d.name, "description": "",
+                "error": f"{type(e).__name__}: {e}"}
+    return {"id": reg.slug_for(d), "path": str(d), "name": name, "description": desc}
+
+
+def _project_detail(reg: Registry, d: Path) -> dict:
+    proj = load_project(d)
+    corpus = proj.corpus_path()
+    corpus_files = sorted(p.name for p in corpus.iterdir()
+                          if p.is_file() and p.suffix.lower() in (".txt", ".md")) if corpus.is_dir() else []
+    seeds_n = 0
+    if proj.seeds_file and proj.p(proj.seeds_file).is_file():
+        seeds_n = sum(1 for ln in proj.p(proj.seeds_file).read_text(encoding="utf-8").splitlines() if ln.strip())
+    return {
+        "id": reg.slug_for(d), "path": str(d), "name": proj.name, "description": proj.description,
+        "config": _project_config_dict(proj),
+        "corpus_files": corpus_files, "seed_count": seeds_n,
+        "dataset_state": _dataset_state(proj),
+    }
+
+
+def _write_config(d: Path, incoming: dict) -> None:
+    """Merge `incoming` onto the project's current config and write project.toml back, atomically:
+    the new file is written to a temp path and validated (via load_project) before it replaces the
+    original, so a bad config never corrupts the project. Long prose fields are spilled to
+    prompts/<field>.md and referenced by filename. (TOML has no null — None values are dropped and
+    fall back to dataclass defaults on load.)"""
+    _dump = _toml_dumps
+    toml_path = d / "project.toml"
+    if sys.version_info >= (3, 11):
+        import tomllib
+    else:  # pragma: no cover
+        import tomli as tomllib
+    try:
+        current = tomllib.loads(toml_path.read_text(encoding="utf-8")) if toml_path.is_file() else {}
+    except tomllib.TOMLDecodeError:
+        current = {}  # existing file is broken — rebuild from the incoming config alone
+
+    def _spill(text: str, fname: str) -> str:
+        target = d / fname
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        return fname
+
+    def _is_prose(v) -> bool:
+        return isinstance(v, str) and (len(v) > _SPILL_THRESHOLD or "\n" in v)
+
+    for k, v in (incoming or {}).items():
+        if k == "root":
+            continue
+        if k in _SPILL_FIELDS and _is_prose(v):
+            current[k] = _spill(v, f"prompts/{k}.md")
+        elif k == "modes" and isinstance(v, list):
+            out_modes = []
+            for m in v:
+                m = dict(m)
+                if _is_prose(m.get("description", "")):
+                    safe = _slugify(m.get("name", "mode"))
+                    m["description"] = _spill(m["description"], f"prompts/modes/{safe}.md")
+                out_modes.append(m)
+            current["modes"] = out_modes
+        elif k == "triage" and isinstance(v, dict):
+            t = dict(v)
+            if _is_prose(t.get("rubric", "")):
+                t["rubric"] = _spill(t["rubric"], "prompts/triage_rubric.md")
+            current["triage"] = {**current.get("triage", {}), **t}
+        elif k == "deploy" and isinstance(v, dict):
+            dp = dict(v)
+            if _is_prose(dp.get("system_message", "")):
+                dp["system_message"] = _spill(dp["system_message"], "prompts/deploy_system.md")
+            current["deploy"] = {**current.get("deploy", {}), **dp}
+        elif isinstance(v, dict) and isinstance(current.get(k), dict):
+            current[k] = {**current[k], **v}     # shallow-merge stage configs
+        else:
+            current[k] = v
+
+    # write to a temp file, validate it loads, then atomically replace the original
+    tmp = toml_path.with_suffix(".toml.tmp")
+    tmp.write_text(_dump(current), encoding="utf-8")
+    try:
+        load_project(tmp)              # validate the new content (passing the file path directly)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+    tmp.replace(toml_path)
+
+
+def _toml_dumps(obj, _prefix="") -> str:
+    """Minimal TOML serializer (no external dep). Handles scalars, strings (incl. multiline via
+    triple-quote), lists of scalars, arrays of inline tables, and nested tables / array-of-tables.
+    Lossy: comments and literal-string quoting in an existing project.toml are not preserved."""
+    def fmt_scalar(v):
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, (int, float)):
+            return repr(v)
+        if isinstance(v, str):
+            if "\n" in v:
+                return '"""\n' + v + ('"""' if v.endswith("\n") else '\n"""')
+            return json.dumps(v)
+        return json.dumps(v)
+
+    def fmt_inline_table(t):
+        return "{ " + ", ".join(f"{k} = {fmt_scalar(x)}" for k, x in t.items() if x is not None) + " }"
+
+    def _clean(d):  # TOML has no null — drop None keys (they fall back to dataclass defaults on load)
+        return {k: v for k, v in d.items() if v is not None}
+
+    lines, tables, arrays_of_tables = [], [], []
+    for k, v in obj.items():
+        if v is None:
+            continue
+        if isinstance(v, dict):
+            tables.append((k, _clean(v)))
+        elif isinstance(v, list) and v and all(isinstance(x, dict) for x in v):
+            cleaned = [_clean(x) for x in v]
+            if all(all(not isinstance(xx, (dict, list)) for xx in x.values()) for x in cleaned):
+                lines.append(f"{k} = [\n" + "".join(f"  {fmt_inline_table(x)},\n" for x in cleaned) + "]")
+            else:
+                arrays_of_tables.append((k, cleaned))
+        elif isinstance(v, list):
+            lines.append(f"{k} = [" + ", ".join(fmt_scalar(x) for x in v if x is not None) + "]")
+        else:
+            lines.append(f"{k} = {fmt_scalar(v)}")
+    out = "\n".join(lines)
+    for k, t in tables:
+        out += f"\n\n[{(_prefix + '.' if _prefix else '') + k}]\n" + _toml_dumps(t, _prefix=(_prefix + '.' if _prefix else '') + k)
+    for k, lst in arrays_of_tables:
+        for item in lst:
+            out += f"\n\n[[{(_prefix + '.' if _prefix else '') + k}]]\n" + _toml_dumps(item, _prefix=(_prefix + '.' if _prefix else '') + k)
+    return out.strip() + "\n"
+
+
+# --------------------------------------------------------------------------- the app
+
+def create_app(roots: list[Path], *, auth_token: str | None = None, auth_required: bool = False) -> FastAPI:
+    app = FastAPI(title="voicepipe", version="0.1.0")
+    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+    reg = Registry(roots)
+    mgr = jobsmod.JobManager()
+    mgr.scan([d for _, d in reg.all()])
+
+    need_auth = bool(auth_token) and auth_required
+
+    # /v1/health is always reachable (liveness probe; lets the UI learn auth_required before anything else).
+    _AUTH_EXEMPT = ("/v1/health",)
+
+    @app.middleware("http")
+    async def _auth(request: Request, call_next):
+        path = request.url.path
+        if need_auth and path.startswith("/v1") and path not in _AUTH_EXEMPT and request.method != "OPTIONS":
+            tok = None
+            authz = request.headers.get("authorization", "")
+            if authz.lower().startswith("bearer "):
+                tok = authz[7:].strip()
+            tok = tok or request.query_params.get("token") or request.cookies.get("vp_token")
+            if tok != auth_token:
+                return JSONResponse({"detail": "unauthorized"}, status_code=401)
+        return await call_next(request)
+
+    # ---- meta ----
+
+    @app.get("/v1/health")
+    def health():
+        try:
+            import torch  # noqa: F401
+            has_torch = True
+        except Exception:
+            has_torch = False
+        import shutil as _sh
+        return {"ok": True, "version": "0.1.0", "python": sys.version.split()[0],
+                "has_torch": has_torch, "has_ollama": bool(_sh.which("ollama")),
+                "ollama_api_key_set": bool(os.environ.get("OLLAMA_API_KEY")),
+                "auth_required": need_auth, "roots": [str(r) for r in reg.roots]}
+
+    @app.get("/v1/defaults")
+    def defaults():
+        return _project_config_dict(_jsonable_default_project())
+
+    @app.get("/v1/templates")
+    def templates():
+        return scaffold.list_templates()
+
+    @app.get("/v1/providers")
+    def providers():
+        # Minimal for now: report the Ollama Cloud entry and whether its key is present.
+        return [{"id": "ollama_cloud", "kind": "ollama_cloud", "base_url": "https://ollama.com",
+                 "ready": bool(os.environ.get("OLLAMA_API_KEY")),
+                 "note": "set OLLAMA_API_KEY to use synthesis/triage"},
+                {"id": "ollama_local", "kind": "openai_compat", "base_url": "http://localhost:11434/v1",
+                 "ready": True, "note": "local Ollama (also serves nomic-embed-text for dedup)"}]
+
+    def _settings_payload() -> dict:
+        return {"project_roots": [str(r) for r in reg.roots],
+                "roots_are_default": not _load_app_config().get("project_roots"),
+                "ollama_api_key_set": bool(os.environ.get("OLLAMA_API_KEY")),
+                "llama_cpp_dir": _load_app_config().get("llama_cpp_dir") or "",
+                "config_file": str(_CONFIG_FILE), "env_file": str(_ENV_FILE)}
+
+    @app.get("/v1/config")
+    def get_config():
+        """All user-level settings: project-scan folders, whether the Ollama key is set, the
+        default llama.cpp dir (for `deploy`), where the config/env files live."""
+        return _settings_payload()
+
+    @app.put("/v1/config")
+    async def put_config(request: Request):
+        body = await request.json()
+        cfg = _load_app_config()
+        if "project_roots" in body:
+            roots_in = body["project_roots"]
+            if not isinstance(roots_in, list):
+                raise HTTPException(400, "project_roots must be a list of directory paths")
+            new_roots = [Path(str(r)).expanduser().resolve() for r in roots_in if str(r).strip()]
+            cfg["project_roots"] = [str(r) for r in new_roots]
+            reg.roots = new_roots
+            reg.refresh()
+            mgr.scan([d for _, d in reg.all()])
+        if "llama_cpp_dir" in body:
+            v = str(body["llama_cpp_dir"] or "").strip()
+            if v:
+                cfg["llama_cpp_dir"] = str(Path(v).expanduser())
+            else:
+                cfg.pop("llama_cpp_dir", None)
+        _save_app_config(cfg)
+        if "ollama_api_key" in body:                       # write to ~/.config/voicepipe/env (mode 600)
+            _set_env_file_var("OLLAMA_API_KEY", str(body["ollama_api_key"] or "").strip())
+        return _settings_payload()
+
+    # ---- projects ----
+
+    @app.get("/v1/projects")
+    def list_projects():
+        return [_project_summary(reg, d) for _, d in reg.all()]
+
+    @app.post("/v1/projects")
+    async def create_project(request: Request):
+        body = await request.json()
+        if body.get("path"):
+            p = Path(body["path"]).expanduser().resolve()
+            if not (p / "project.toml").is_file():
+                raise HTTPException(400, f"no project.toml at {p}")
+            _register_path(p); _unhide_project(p)
+            reg.refresh()
+            return _project_detail(reg, p)
+        # scaffold
+        name = body.get("name")
+        if not name:
+            raise HTTPException(400, "name (or path) required")
+        template = body.get("template", "character")
+        parent = Path(body.get("parent_dir") or (Path.home() / "voicepipe-projects")).expanduser().resolve()
+        dest = parent / _slugify(name)
+        try:
+            scaffold.create_project(dest, template=template, name=name, description=body.get("description", ""))
+        except (FileExistsError, ValueError) as e:
+            raise HTTPException(400, str(e))
+        _register_path(dest); _unhide_project(dest)
+        reg.refresh()
+        mgr.scan([dest])
+        return _project_detail(reg, dest)
+
+    def _dir(project_id: str) -> Path:
+        try:
+            return reg.dir_for(project_id)
+        except KeyError:
+            raise HTTPException(404, f"no project {project_id!r}")
+
+    @app.get("/v1/projects/{project_id}")
+    def get_project(project_id: str):
+        return _project_detail(reg, _dir(project_id))
+
+    @app.delete("/v1/projects/{project_id}")
+    def remove_project(project_id: str, purge: bool = False):
+        """Take a project off the list (unregister it + don't auto-rescan it). Files are left
+        alone; with ?purge=true the produced dataset/ is deleted, but corpus/seeds/prompts stay."""
+        d = _dir(project_id)
+        _unregister_path(d)
+        # also mask it: scan roots and the dev-checkout seeding would otherwise re-add it.
+        cfg = _load_app_config()
+        hidden = set(cfg.get("hidden_projects", []))
+        hidden.add(str(d))
+        cfg["hidden_projects"] = sorted(hidden)
+        _save_app_config(cfg)
+        if purge:
+            import shutil
+            ds = d / "dataset"
+            if ds.is_dir():
+                shutil.rmtree(ds, ignore_errors=True)
+        reg.refresh()
+        return {"ok": True, "removed": str(d), "purged": bool(purge)}
+
+    @app.put("/v1/projects/{project_id}/config")
+    async def put_config(project_id: str, request: Request):
+        d = _dir(project_id)
+        body = await request.json()
+        try:
+            _write_config(d, body.get("config", body))
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, f"config did not validate: {type(e).__name__}: {e}")
+        reg.refresh()
+        return _project_detail(reg, d)
+
+    def _safe_child(d: Path, relpath: str) -> Path:
+        """Resolve `relpath` under project dir `d`, refusing anything that escapes it (incl. via
+        `..` or a symlink). Also block the produced dataset/ subtree so file edits can't fight the
+        engine."""
+        root = d.resolve()
+        fp = (root / relpath).resolve()
+        try:
+            fp.relative_to(root)
+        except ValueError:
+            raise HTTPException(400, "path escapes the project directory")
+        try:
+            from pipeline.project import load_project as _lp
+            ds = _lp(d).dataset_path().resolve()
+            if fp == ds or ds in fp.parents:
+                raise HTTPException(400, "the dataset/ tree is managed by the engine; not editable here")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+        return fp
+
+    @app.get("/v1/projects/{project_id}/files/{relpath:path}")
+    def get_file(project_id: str, relpath: str):
+        fp = _safe_child(_dir(project_id), relpath)
+        if not fp.is_file():
+            raise HTTPException(404, "no such file")
+        return PlainTextResponse(fp.read_text(encoding="utf-8", errors="replace"))
+
+    @app.put("/v1/projects/{project_id}/files/{relpath:path}")
+    async def put_file(project_id: str, relpath: str, request: Request):
+        fp = _safe_child(_dir(project_id), relpath)
+        body = await request.json()
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        fp.write_text(body.get("content", ""), encoding="utf-8")
+        return {"ok": True, "path": str(fp)}
+
+    # ---- stage runs ----
+
+    @app.post("/v1/projects/{project_id}/stages/{stage}/run")
+    async def run_stage(project_id: str, stage: str, request: Request):
+        d = _dir(project_id)
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:
+            pass
+        try:
+            meta = mgr.start(d, stage, overrides=body.get("overrides"),
+                             smoke=bool(body.get("smoke")), gpu=body.get("gpu"))
+        except RuntimeError as e:      # already running
+            raise HTTPException(409, str(e))
+        except (ValueError, FileNotFoundError) as e:
+            raise HTTPException(400, str(e))
+        return JSONResponse(meta, status_code=201)
+
+    # ---- jobs ----
+
+    @app.get("/v1/jobs")
+    def list_jobs(project: str | None = None):
+        pd = None
+        if project:
+            try:
+                pd = reg.dir_for(project)
+            except KeyError:
+                pd = Path(project)
+        mgr.scan([d for _, d in reg.all()])
+        return mgr.list(pd)
+
+    @app.get("/v1/jobs/{job_id}")
+    def get_job(job_id: str):
+        meta = mgr.get(job_id)
+        if not meta:
+            raise HTTPException(404, f"no job {job_id}")
+        meta = dict(meta)
+        meta["events"] = mgr.read_events(job_id)[-50:]
+        meta["console_tail"] = jobsmod.read_console(Path(meta["dir"]) / "console.log", tail=200)
+        return meta
+
+    @app.get("/v1/jobs/{job_id}/log")
+    def job_log(job_id: str, tail: int | None = None):
+        meta = mgr.get(job_id)
+        if not meta:
+            raise HTTPException(404, f"no job {job_id}")
+        return PlainTextResponse(jobsmod.read_console(Path(meta["dir"]) / "console.log", tail=tail))
+
+    @app.post("/v1/jobs/{job_id}/cancel")
+    def cancel_job(job_id: str):
+        try:
+            return mgr.cancel(job_id)
+        except KeyError:
+            raise HTTPException(404, f"no job {job_id}")
+
+    @app.get("/v1/jobs/{job_id}/events")
+    async def job_events(job_id: str, since: int = 0):
+        meta = mgr.get(job_id)
+        if not meta:
+            raise HTTPException(404, f"no job {job_id}")
+
+        async def gen():
+            import asyncio
+            seq = since
+            saw_terminal = False
+            idle = 0
+            while True:
+                evts = mgr.read_events(job_id, since=seq)
+                for e in evts:
+                    seq = e["seq"]
+                    if e.get("type") == "stage_end":
+                        saw_terminal = True
+                    yield f"data: {json.dumps(e)}\n\n"
+                if evts:
+                    idle = 0
+                else:
+                    idle += 1
+                if saw_terminal:
+                    break
+                if not mgr.is_running(job_id) and idle > 4:   # process gone, give the file a moment to flush
+                    # one last drain
+                    for e in mgr.read_events(job_id, since=seq):
+                        seq = e["seq"]
+                        yield f"data: {json.dumps(e)}\n\n"
+                    yield f"event: end\ndata: {json.dumps({'job_id': job_id})}\n\n"
+                    break
+                await asyncio.sleep(0.5)
+            yield f"event: end\ndata: {json.dumps({'job_id': job_id})}\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    # ---- the web UI (static) ----
+
+    _NO_STORE = {"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"}
+
+    if _WEBUI_DIR.is_dir():
+        @app.get("/")
+        def index():
+            return FileResponse(_WEBUI_DIR / "index.html", headers=_NO_STORE)
+
+        @app.get("/app.js")
+        def appjs():
+            return FileResponse(_WEBUI_DIR / "app.js", media_type="text/javascript", headers=_NO_STORE)
+
+        @app.get("/style.css")
+        def stylecss():
+            return FileResponse(_WEBUI_DIR / "style.css", media_type="text/css", headers=_NO_STORE)
+
+        app.mount("/", StaticFiles(directory=str(_WEBUI_DIR), html=True), name="webui")
+    else:
+        @app.get("/")
+        def index_missing():
+            return PlainTextResponse("voicepipe server is up. (web UI files not found at "
+                                     f"{_WEBUI_DIR}.)  API is under /v1/", status_code=200)
+
+    return app
+
+
+def _jsonable_default_project() -> Project:
+    return Project(name="example")
+
+
+# --------------------------------------------------------------------------- entrypoint
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="voicepipe serve", description="run the voicepipe control server + web GUI")
+    ap.add_argument("--host", default="127.0.0.1", help="bind host (default 127.0.0.1; use 0.0.0.0 for remote)")
+    ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--unix-socket", default=None, help="bind a Unix domain socket instead of host:port (no auth; for the native app)")
+    ap.add_argument("--auth-token", default=os.environ.get("VOICEPIPE_AUTH_TOKEN"),
+                    help="shared password for /v1/* over TCP (also $VOICEPIPE_AUTH_TOKEN). Required automatically for non-loopback hosts.")
+    ap.add_argument("--no-auth", action="store_true",
+                    help="never require auth, even if a token is in the env (the native desktop app passes this; trusted local use only).")
+    ap.add_argument("--root", action="append", default=None, help="project root to scan (repeatable). Default: cwd, ~/voicepipe-projects, ./projects, ./scratch")
+    ap.add_argument("--no-browser", action="store_true", help="don't try to open a browser")
+    args = ap.parse_args(argv if argv is not None else sys.argv[1:])
+    _load_env_file()   # ~/.config/voicepipe/env -> os.environ (OLLAMA_API_KEY, VOICEPIPE_AUTH_TOKEN, ...)
+    _start_parent_watchdog()                           # exit if the desktop-shell parent dies (if VOICEPIPE_PARENT_PID set)
+    if args.no_auth:
+        args.auth_token = None                         # the native app passes --no-auth; ignore any ambient token
+    elif args.auth_token is None:                      # the argparse default read env before the file load
+        args.auth_token = os.environ.get("VOICEPIPE_AUTH_TOKEN")
+
+    _seed_registry_from_repo()                          # dev checkout: keep projects/ and scratch/ visible (no-op when packaged)
+    roots = _resolve_roots(args.root)
+
+    over_uds = bool(args.unix_socket)
+    is_loopback = args.host in ("127.0.0.1", "::1", "localhost")
+    auth_required = (not over_uds) and (not args.no_auth) and ((not is_loopback) or bool(args.auth_token))
+    if (not over_uds) and (not is_loopback) and (not args.auth_token) and (not args.no_auth):
+        raise SystemExit("binding a non-loopback host requires --auth-token (or $VOICEPIPE_AUTH_TOKEN), "
+                         "or pass --no-auth if you really mean to expose it unauthenticated")
+    if auth_required:
+        print("[serve] auth ENABLED — clients must present the token")
+    elif over_uds:
+        print(f"[serve] Unix socket {args.unix_socket} — auth bypassed (trusted local app)")
+    elif args.no_auth:
+        print("[serve] --no-auth — auth disabled")
+
+    app = create_app(roots, auth_token=args.auth_token, auth_required=auth_required)
+
+    try:
+        import uvicorn
+    except ImportError:
+        raise SystemExit("uvicorn not installed — `pip install -e .[gui]`")
+
+    # Use pure-Python uvicorn internals (asyncio loop, h11 parser) — negligible perf cost for a
+    # localhost control server, and it sidesteps the uvloop/httptools C-extension headaches when
+    # this is run from a PyInstaller-frozen bundle (the desktop sidecar).
+    _uv = dict(log_level="info", loop="asyncio", http="h11")
+    if over_uds:
+        sock = Path(args.unix_socket)
+        if sock.exists():
+            sock.unlink()
+        print(f"[serve] listening on unix:{sock}")
+        uvicorn.run(app, uds=str(sock), **_uv)
+    else:
+        url = f"http://{args.host}:{args.port}"
+        print(f"[serve] {url}  (roots: {', '.join(str(r) for r in roots)})")
+        if is_loopback and not args.no_browser:
+            try:
+                import webbrowser, threading
+                threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+            except Exception:
+                pass
+        uvicorn.run(app, host=args.host, port=args.port, **_uv)
+
+
+if __name__ == "__main__":
+    main()

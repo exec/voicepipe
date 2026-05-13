@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2/capability",
+  "identifier": "default",
+  "description": "voicepipe desktop — the webview talks to the local sidecar over HTTP; the only privileged things it does are basic window management (drag the topbar, the custom min/max/close buttons on Windows/Linux) and a startup error dialog.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-maximize",
+    "core:window:allow-unmaximize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "shell:default",
+    "dialog:default"
+  ]
+}

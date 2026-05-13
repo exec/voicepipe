@@ -1,0 +1,32 @@
+MIT License
+
+Copyright (c) 2026 voicepipe contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+NOTE on generated content: voicepipe builds fine-tuning datasets and models in
+the voice of whatever corpus you point it at. The corpus you supply, the
+dataset it produces, and the model it trains are yours and your responsibility
+— including any content, licensing, or policy obligations attached to the
+source material. The bundled `character` project template ships content rules
+(no slurs; no attributing villainy to whole groups; no out-of-era references;
+no AI-acknowledgment) as sensible defaults for both synthesis and the deployed
+model's moderation layer, but enforcing them is on you.

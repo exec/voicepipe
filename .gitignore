@@ -1,0 +1,38 @@
+# Working data, experiments, in-progress projects — not version-controlled.
+scratch/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Rust / Tauri
+target/
+desktop/src-tauri/gen/
+
+# Node (if a JS toolchain is added later)
+node_modules/
+
+# Pipeline-generated artifacts
+*.gguf
+*.safetensors
+*.bin
+dataset/
+
+# Logs
+*.log
+
+# Env / secrets
+.env
+*.env
+!.env.example
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

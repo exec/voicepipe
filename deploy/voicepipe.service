@@ -1,0 +1,30 @@
+# systemd unit for the WEB-ONLY voicepipe deployment (the desktop app does NOT use this — it
+# spawns its own loopback sidecar). Bound to a host:port with an auth token; reach it in a
+# browser. Adjust the User, paths, host, and Environment lines, then:
+#   sudo cp deploy/voicepipe.service /etc/systemd/system/voicepipe.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now voicepipe
+#
+# The auth token MUST be set for any non-loopback --host (the server refuses to start otherwise).
+# Generate one: `openssl rand -hex 24`. Put it in /etc/voicepipe/env (mode 600), not here.
+
+[Unit]
+Description=voicepipe — corpus-to-character pipeline (web UI + control API)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=voicepipe
+Group=voicepipe
+WorkingDirectory=/opt/voicepipe
+# the venv that has `pip install -e .[gui]` (and [train]/[deploy] if this box also trains):
+EnvironmentFile=/etc/voicepipe/env
+ExecStart=/opt/voicepipe/.venv/bin/voicepipe serve --host 0.0.0.0 --port 8765 --auth-token ${VOICEPIPE_AUTH_TOKEN} --root /opt/voicepipe/projects
+Restart=on-failure
+RestartSec=5
+# the projects/ tree, ~/.config/voicepipe, and HF/Ollama caches need to be writable:
+ProtectSystem=full
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

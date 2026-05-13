@@ -1,0 +1,18 @@
+# Pinned, known-good versions for `pip install -e .[train] -c constraints-train.txt` on an
+# NVIDIA Blackwell box (RTX 50-series, sm_120 — needs CUDA 12.8). Verified for QLoRA fine-tuning
+# of Llama 3.1 8B and Mistral Nemo 12B. DO NOT casually bump `transformers` — 5.x cascades into
+# peft>=0.19 + trl>=1.x, and trl 1.4.0 has a Windows charmap-decode bug that breaks importing it.
+#
+#   pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.11.0
+#   pip install -e .[train] -c constraints-train.txt
+#
+# (torch is installed separately from the PyTorch cu128 index, then constrained here so nothing
+# else drags in a different build.)
+torch==2.11.0
+transformers==4.50.0
+tokenizers==0.21.4
+peft==0.14.0
+trl==0.15.0
+accelerate==1.5.2
+datasets==3.3.2
+bitsandbytes==0.49.2

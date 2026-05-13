@@ -1,0 +1,28 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "voicepipe",
+  "version": "0.1.0",
+  "identifier": "dev.voicepipe.desktop",
+  "build": {
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "",
+    "frontendDist": "../../pipeline/webui"
+  },
+  "app": {
+    "windows": [],
+    "withGlobalTauri": true,
+    "security": { "csp": null }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.png"],
+    "category": "DeveloperTool",
+    "shortDescription": "Corpus-to-character pipeline",
+    "longDescription": "Synthesize a fine-tuning dataset in a target voice, dedup it, triage it, assemble it, QLoRA-train a base model, and deploy via Ollama — a GUI over the same engine the CLI uses.",
+    "externalBin": [],
+    "resources": {
+      "../sidecar/dist/voicepipe-serve": "voicepipe-serve"
+    }
+  }
+}

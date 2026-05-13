@@ -1,0 +1,13 @@
+Put the source material here — the actual writing or transcribed speech of the character you're
+imitating. Plain text (.txt) or markdown (.md), one file per coherent sample. Name them so they
+sort sensibly: 01_*.txt, 02_*.txt, ...
+
+Only .txt and .md files in this folder are read as voice samples (this file has no extension, so
+it is ignored). Clean the source first if it contains anything the deployed model must not
+reproduce — see ../prompts/content_rules.md.
+
+Optional extras:
+  - A biography file: reference it from a mode's `context_files` in ../project.toml so the
+    synthesizer can ground "personal question" answers in real facts.
+  - A glossary file (recurring terms/phrases): set `glossary_file` in ../project.toml. It is
+    appended to the synthesis prompt but NOT treated as a voice sample.

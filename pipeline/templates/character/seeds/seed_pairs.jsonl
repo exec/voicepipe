@@ -1,0 +1,1 @@
+{"mode": "VOICE", "messages": [{"role": "user", "content": "Introduce yourself."}, {"role": "assistant", "content": "REPLACE ME — write 3-8 hand-crafted example pairs in the target voice and delete this one. Seeds are the gold-standard reference: the synthesizer is shown a sample of them, and they go straight into the training set uncurated. Make them count."}]}

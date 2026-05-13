@@ -1,0 +1,149 @@
+# Oscar Wilde — voicepipe project
+#
+# This file is the whole configuration. Scalars and short lists live inline here; long prose
+# blocks (the synthesis preamble, the per-mode instructions, the triage rubric, the deploy
+# system prompt) live as files under prompts/ and are referenced by filename below.
+#
+# To run the pipeline:
+#   voicepipe synthesize --project .   # generate a dataset in the target voice
+#   voicepipe dedup      --project .
+#   voicepipe triage     --project .
+#   voicepipe assemble   --project .
+#   voicepipe train      --project .   # QLoRA fine-tune (needs a CUDA box + the [train] extra)
+#   voicepipe deploy     --project . --adapter dataset/adapter/final --llama-cpp-dir <path> [--push]
+# Or open the GUI: `voicepipe serve` and visit http://127.0.0.1:8765
+#
+# Everything not set here falls back to a sensible default (see pipeline/project.py).
+
+name = "Oscar Wilde"
+description = "Anglo-Irish aesthete, playwright, wit (1854–1900). Languid, paradoxical, epigrammatic — every sentence a polished inversion of a platitude; art for art's sake; the dandy's pose of taking trivial things seriously and serious things with a smile."
+
+corpus_dir = "corpus"
+seeds_file = "seeds/seed_pairs.jsonl"
+# glossary_file = "corpus/00_glossary.md"   # optional: a list of recurring phrases/constructions
+
+synth_preamble = "prompts/synth_preamble.md"
+variety_menus  = "prompts/variety_menus.md"
+content_rules  = "prompts/content_rules.md"
+
+# --- prompt-category mix (what kinds of user message to synthesize) -------------------------
+# proposed by `voicepipe categorize`, with `self_deprecating_humor` renamed to `posed_self_regard`
+# (Wilde's irony is self-aggrandizing, not self-deprecating).
+categories = [
+  { name = "epigrammatic_challenge", description = "a statement or question that invites a witty, paradoxical, or inverted response", weight = 2.5 },
+  { name = "aesthetic_opinion",      description = "a request for Wilde's perspective on art, beauty, or taste", weight = 2.0 },
+  { name = "personal_philosophy",    description = "a question about Wilde's views on life, morality, or society", weight = 1.8 },
+  { name = "trivial_seriousness",    description = "a mundane topic raised so Wilde can treat it with exaggerated, doctrinal gravity", weight = 1.5 },
+  { name = "contrarian_provocation", description = "a platitude or conventional opinion stated so Wilde can invert it", weight = 1.5 },
+  { name = "dandyish_request",       description = "a request that he explain, perform, or defend his dandified idleness or habits", weight = 1.2 },
+  { name = "literary_critique",      description = "a question or statement about literature, criticism, or the role of the artist", weight = 1.2 },
+  { name = "posed_self_regard",      description = "a remark about Wilde himself — his reputation, genius, or follies — inviting a droll, self-aggrandizing reply", weight = 1.0 },
+  { name = "social_observation",     description = "a comment or question about society, manners, or human behaviour", weight = 1.0 },
+  { name = "idle_small_talk",        description = "a casual remark (the weather, the room) made to bait a dismissive epigram", weight = 0.8 },
+]
+
+# --- response-length mix -------------------------------------------------------------------
+length_profiles = [
+  { name = "short",  description = "50-100 words per response",  weight = 0.35 },
+  { name = "medium", description = "100-250 words per response", weight = 0.55 },
+  { name = "long",   description = "250-400 words per response", weight = 0.10 },
+]
+
+# --- modes (registers the responses can be in; each batch is anchored to one) --------------
+# Three registers, each anchored to a corpus file. They share one instruction block (modes/voice.md)
+# — the anchor file is what differentiates them; each batch sees its anchor as PRIMARY and the
+# other two as SECONDARY cross-reference.
+[[modes]]
+name = "WIT"           # the epigram / inversion / trivial-treated-gravely register — the dominant one
+description = "prompts/modes/voice.md"
+weight = 2.0
+corpus_anchor = "01_epigrams.txt"
+styles = []
+
+[[modes]]
+name = "COMEDY"        # drawing-room dialogue: the languid dandy, idleness as a vocation
+description = "prompts/modes/voice.md"
+weight = 1.0
+corpus_anchor = "02_comic_dialogue.txt"
+styles = []
+
+[[modes]]
+name = "CRITICISM"     # the essayistic register: art over nature, beautiful untruth, criticism as creation
+description = "prompts/modes/voice.md"
+weight = 1.0
+corpus_anchor = "03_on_art_and_lying.txt"
+styles = []
+
+# --- synthesis -----------------------------------------------------------------------------
+[synthesis]
+model = "mistral-large-3:675b-cloud"   # the generator
+# alt_model = "kimi-k2.6"
+# Which LLM backend `model` refers to. Omitted = Ollama Cloud (needs OLLAMA_API_KEY — set it in
+# the GUI's Settings, or `export OLLAMA_API_KEY=...`). For any OpenAI-compatible endpoint instead:
+#   [synthesis.provider]
+#   kind = "openai_compat"
+#   base_url = "http://localhost:11434/v1"   # a local Ollama; or an OpenAI / vLLM / LM-Studio URL
+#   # api_key_env = "OPENAI_API_KEY"          # the env var holding the key, if the endpoint needs one
+# (`[triage]` takes the same optional `[triage.provider]` table.)
+temperature = 0.9
+top_p = 0.95
+pairs_per_batch = 12
+concurrency = 3
+think = false                          # disable thinking-token generation (needed for reasoning models)
+target = 2000                           # target total pairs (re-runnable; counts what's on disk)
+balance_modes = true
+
+# --- dedup ---------------------------------------------------------------------------------
+[dedup]
+cosine_threshold = 0.85
+embed_model = "nomic-embed-text"        # run this one locally: `ollama pull nomic-embed-text`
+embed_base_url = "http://localhost:11434"
+skip_embed = false                      # set true for hash-only dedup if you have no local Ollama
+closer_patterns = [
+  # Phrases the generator tends to over-produce. After a synthesis run, look at
+  # dataset/raw/ and add the worst offenders here so no single phrase dominates.
+  # { name = "STOCK_SIGNOFF", regex = 'remember,? you can always', cap = 0.05 },
+]
+
+# --- triage (an LLM judge scores each pair 1-5 and flags policy violations) -----------------
+[triage]
+model = "deepseek-v4-pro"
+batch_size = 30
+min_keep = 4                            # keep pairs scored >= this
+concurrency = 3
+rubric = "prompts/triage_rubric.md"
+critical_flags = ["slur", "out_of_character", "post_cutoff_reference"]
+critical_flag_substrings = ["slur", "hate"]
+
+# --- assemble ------------------------------------------------------------------------------
+[assemble]
+val_fraction = 0.05
+salvage_paths = []                      # extra already-curated jsonl files to mix in
+
+# --- train (QLoRA) -------------------------------------------------------------------------
+[train]
+base_model = "unsloth/Mistral-Nemo-Instruct-2407-bnb-4bit"   # text-only, Apache 2.0, ~8GB GGUF after merge
+lora_r = 64
+lora_alpha = 128
+lora_dropout = 0.05
+max_seq_len = 2048
+batch_size = 4                          # per-device; raise on a bigger GPU
+grad_accum = 4
+epochs = 3.0
+lr = 2e-4
+optim = "paged_adamw_8bit"
+
+# --- deploy (LoRA -> GGUF -> Ollama model) -------------------------------------------------
+[deploy]
+ollama_from = "mistral-nemo:12b"        # the base layer in the generated Modelfile
+ollama_tag = ""                          # e.g. "you/Oscar Wilde:v1" — where `ollama create` writes
+system_message = "prompts/deploy_system.md"
+gguf_outtype = "f16"
+base_model_id_override = "mistralai/Mistral-Nemo-Instruct-2407"   # non-quantized HF mirror for the GGUF converter
+stop = ["</s>"]
+
+[deploy.parameters]
+temperature = 0.85
+top_p = 0.9
+repeat_penalty = 1.08
+num_predict = 400

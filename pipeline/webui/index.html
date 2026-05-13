@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>voicepipe</title>
+<script>if (/Mac/i.test((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent)) document.documentElement.classList.add("is-mac");</script>
+<link rel="stylesheet" href="style.css?v=11" />
+</head>
+<body>
+<div id="app">
+  <header class="topbar" data-tauri-drag-region>
+    <div class="brand" data-tauri-drag-region>
+      <span class="logo">◗◖</span><span class="wordmark">voicepipe</span>
+      <span class="tag">corpus → character</span>
+    </div>
+    <div class="topbar-right">
+      <div id="health" class="health" title="engine status"></div>
+      <button id="newProjectBtn" class="btn btn-primary">+ New project</button>
+      <div id="winControls" class="win-controls"></div>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-head">Projects</div>
+      <ul id="projectList" class="project-list"></ul>
+      <div class="sidebar-foot" id="rootsHint"></div>
+    </aside>
+
+    <main id="main" class="main">
+      <div id="emptyState" class="empty-state">
+        <div class="empty-card">
+          <h1>Pick a project</h1>
+          <p>Or <a href="#" id="newProjectLink">create one</a> from a template. A project is a
+             corpus, a handful of seed examples, and a <code>project.toml</code> — the pipeline
+             turns it into a fine-tuned character model.</p>
+          <p class="muted">CLI: <code>voicepipe new my-character</code> · <code>voicepipe synthesize --project .</code> · <code>voicepipe train --project .</code></p>
+        </div>
+      </div>
+
+      <div id="projectView" class="project-view" hidden>
+        <div class="project-head">
+          <div>
+            <h1 id="pvName"></h1>
+            <p id="pvDesc" class="muted"></p>
+          </div>
+          <nav class="tabs">
+            <button class="tab active" data-tab="pipeline">Pipeline</button>
+            <button class="tab" data-tab="configure">Configure</button>
+            <button class="tab" data-tab="jobs">Jobs</button>
+          </nav>
+        </div>
+
+        <section id="tab-pipeline" class="tab-panel"></section>
+        <section id="tab-configure" class="tab-panel" hidden></section>
+        <section id="tab-jobs" class="tab-panel" hidden></section>
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- New-project modal -->
+<div id="newProjectModal" class="modal-backdrop" hidden>
+  <div class="modal">
+    <h2>New project</h2>
+    <div class="field"><label>Name</label><input id="npName" placeholder="Marcus Aurelius" /></div>
+    <div class="field"><label>Description</label><input id="npDesc" placeholder="Stoic emperor; terse, austere, addresses himself" /></div>
+    <div class="field"><label>Template</label><select id="npTemplate"></select><div id="npTemplateDesc" class="hint"></div></div>
+    <div class="field"><label>Parent directory <span class="hint">(optional — defaults to ~/voicepipe-projects)</span></label><input id="npParent" placeholder="" /></div>
+    <details class="register-existing">
+      <summary>…or register an existing project directory</summary>
+      <div class="field"><label>Path to a directory containing <code>project.toml</code></label><input id="npExisting" placeholder="/path/to/project" /></div>
+    </details>
+    <div class="modal-actions">
+      <button class="btn" id="npCancel">Cancel</button>
+      <button class="btn btn-primary" id="npCreate">Create</button>
+    </div>
+    <div id="npError" class="error-line" hidden></div>
+  </div>
+</div>
+
+<!-- Settings modal -->
+<div id="settingsModal" class="modal-backdrop" hidden>
+  <div class="modal" style="width:520px">
+    <h2>Settings</h2>
+
+    <div class="field">
+      <label>Ollama Cloud API key <span class="hint">— for synthesize / triage / categorize</span></label>
+      <input id="setApiKey" type="password" autocomplete="off" placeholder="(leave blank to keep current)" />
+      <div id="setApiKeyState" class="hint" style="margin-top:3px"></div>
+    </div>
+
+    <div class="field">
+      <label>llama.cpp directory <span class="hint">— a checkout with <code>convert_lora_to_gguf.py</code>; used by <code>deploy</code> when the project doesn't set its own</span></label>
+      <input id="setLlamaDir" type="text" spellcheck="false" placeholder="/path/to/llama.cpp" />
+    </div>
+
+    <details class="cfg-section" style="margin-top:4px">
+      <summary>Connect to a remote engine</summary>
+      <div class="cfg-body">
+        <p class="muted">Drive the pipeline on another machine (e.g. a GPU box running <code>voicepipe serve --host 0.0.0.0 --auth-token …</code>). Leave the URL blank to use this machine.</p>
+        <div class="field"><label>Engine URL</label><input id="setEngineUrl" type="text" spellcheck="false" placeholder="(blank = this machine)  e.g. https://gpubox.lan:8765" /></div>
+        <div class="field"><label>Access token</label><input id="setEngineToken" type="password" autocomplete="off" placeholder="the server's --auth-token" /></div>
+      </div>
+    </details>
+
+    <details class="cfg-section">
+      <summary>Project folders <span id="setFoldersCount" class="hint"></span></summary>
+      <div class="cfg-body">
+        <p class="muted">Scanned one level deep for <code>project.toml</code>. Projects you create or open are remembered regardless of this list.</p>
+        <div id="foldersList" class="row-list"></div>
+        <button class="btn btn-sm" id="foldersAdd" style="margin-top:8px">+ Add folder</button>
+        <div id="foldersHint" class="hint" style="margin-top:8px"></div>
+      </div>
+    </details>
+
+    <div class="modal-actions">
+      <button class="btn" id="setCancel">Cancel</button>
+      <button class="btn btn-primary" id="setSave">Save</button>
+    </div>
+    <div id="setError" class="error-line" hidden></div>
+  </div>
+</div>
+
+<!-- Auth modal -->
+<div id="authModal" class="modal-backdrop" hidden>
+  <div class="modal">
+    <h2>Password required</h2>
+    <p class="muted">This voicepipe server is configured for remote access. Enter the access token.</p>
+    <div class="field"><label>Token</label><input id="authInput" type="password" autocomplete="current-password" /></div>
+    <div class="modal-actions"><button class="btn btn-primary" id="authSubmit">Unlock</button></div>
+    <div id="authError" class="error-line" hidden></div>
+  </div>
+</div>
+
+<div id="toasts" class="toasts"></div>
+<script src="app.js?v=11"></script>
+</body>
+</html>

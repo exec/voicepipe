@@ -1,0 +1,127 @@
+# {{NAME}} — voicepipe project
+#
+# This file is the whole configuration. Scalars and short lists live inline here; long prose
+# blocks (the synthesis preamble, the per-mode instructions, the triage rubric, the deploy
+# system prompt) live as files under prompts/ and are referenced by filename below.
+#
+# To run the pipeline:
+#   voicepipe synthesize --project .   # generate a dataset in the target voice
+#   voicepipe dedup      --project .
+#   voicepipe triage     --project .
+#   voicepipe assemble   --project .
+#   voicepipe train      --project .   # QLoRA fine-tune (needs a CUDA box + the [train] extra)
+#   voicepipe deploy     --project . --adapter dataset/adapter/final --llama-cpp-dir <path> [--push]
+# Or open the GUI: `voicepipe serve` and visit http://127.0.0.1:8765
+#
+# Everything not set here falls back to a sensible default (see pipeline/project.py).
+
+name = "{{NAME}}"
+description = "{{DESCRIPTION}}"
+
+corpus_dir = "corpus"
+seeds_file = "seeds/seed_pairs.jsonl"
+# glossary_file = "corpus/00_glossary.md"   # optional: a list of recurring phrases/constructions
+
+synth_preamble = "prompts/synth_preamble.md"
+variety_menus  = "prompts/variety_menus.md"
+content_rules  = "prompts/content_rules.md"
+
+# --- prompt-category mix (what kinds of user message to synthesize) -------------------------
+categories = [
+  { name = "casual_question",     weight = 0.30 },
+  { name = "opinion_request",     weight = 0.20 },
+  { name = "personal_question",   weight = 0.20 },
+  { name = "explain_something",   weight = 0.20 },
+  { name = "greeting_or_banter",  weight = 0.10 },
+]
+
+# --- response-length mix -------------------------------------------------------------------
+length_profiles = [
+  { name = "short",  description = "50-100 words per response",  weight = 0.35 },
+  { name = "medium", description = "100-250 words per response", weight = 0.55 },
+  { name = "long",   description = "250-400 words per response", weight = 0.10 },
+]
+
+# --- modes (registers the responses can be in; each batch is anchored to one) --------------
+# Start with one. Add more [[modes]] blocks as the voice has distinct registers (e.g. a
+# "tells-a-story" mode, a "rants" mode, an "answers-personal-questions-plainly" mode).
+[[modes]]
+name = "VOICE"
+description = "prompts/modes/voice.md"
+weight = 1.0
+# corpus_anchor = "01_primary_sample.txt"   # the corpus file that best exemplifies this register
+styles = []
+
+# --- synthesis -----------------------------------------------------------------------------
+[synthesis]
+model = "mistral-large-3:675b-cloud"   # the generator
+# alt_model = "kimi-k2.6"
+# Which LLM backend `model` refers to. Omitted = Ollama Cloud (needs OLLAMA_API_KEY — set it in
+# the GUI's Settings, or `export OLLAMA_API_KEY=...`). For any OpenAI-compatible endpoint instead:
+#   [synthesis.provider]
+#   kind = "openai_compat"
+#   base_url = "http://localhost:11434/v1"   # a local Ollama; or an OpenAI / vLLM / LM-Studio URL
+#   # api_key_env = "OPENAI_API_KEY"          # the env var holding the key, if the endpoint needs one
+# (`[triage]` takes the same optional `[triage.provider]` table.)
+temperature = 0.9
+top_p = 0.95
+pairs_per_batch = 12
+concurrency = 3
+think = false                          # disable thinking-token generation (needed for reasoning models)
+target = 2000                           # target total pairs (re-runnable; counts what's on disk)
+balance_modes = true
+
+# --- dedup ---------------------------------------------------------------------------------
+[dedup]
+cosine_threshold = 0.85
+embed_model = "nomic-embed-text"        # run this one locally: `ollama pull nomic-embed-text`
+embed_base_url = "http://localhost:11434"
+skip_embed = false                      # set true for hash-only dedup if you have no local Ollama
+closer_patterns = [
+  # Phrases the generator tends to over-produce. After a synthesis run, look at
+  # dataset/raw/ and add the worst offenders here so no single phrase dominates.
+  # { name = "STOCK_SIGNOFF", regex = 'remember,? you can always', cap = 0.05 },
+]
+
+# --- triage (an LLM judge scores each pair 1-5 and flags policy violations) -----------------
+[triage]
+model = "deepseek-v4-pro"
+batch_size = 30
+min_keep = 4                            # keep pairs scored >= this
+concurrency = 3
+rubric = "prompts/triage_rubric.md"
+critical_flags = ["slur", "out_of_character", "post_cutoff_reference"]
+critical_flag_substrings = ["slur", "hate"]
+
+# --- assemble ------------------------------------------------------------------------------
+[assemble]
+val_fraction = 0.05
+salvage_paths = []                      # extra already-curated jsonl files to mix in
+
+# --- train (QLoRA) -------------------------------------------------------------------------
+[train]
+base_model = "unsloth/Mistral-Nemo-Instruct-2407-bnb-4bit"   # text-only, Apache 2.0, ~8GB GGUF after merge
+lora_r = 64
+lora_alpha = 128
+lora_dropout = 0.05
+max_seq_len = 2048
+batch_size = 4                          # per-device; raise on a bigger GPU
+grad_accum = 4
+epochs = 3.0
+lr = 2e-4
+optim = "paged_adamw_8bit"
+
+# --- deploy (LoRA -> GGUF -> Ollama model) -------------------------------------------------
+[deploy]
+ollama_from = "mistral-nemo:12b"        # the base layer in the generated Modelfile
+ollama_tag = ""                          # e.g. "you/{{NAME}}:v1" — where `ollama create` writes
+system_message = "prompts/deploy_system.md"
+gguf_outtype = "f16"
+base_model_id_override = "mistralai/Mistral-Nemo-Instruct-2407"   # non-quantized HF mirror for the GGUF converter
+stop = ["</s>"]
+
+[deploy.parameters]
+temperature = 0.85
+top_p = 0.9
+repeat_penalty = 1.08
+num_predict = 400
