@@ -11,7 +11,9 @@
   "app": {
     "windows": [],
     "withGlobalTauri": true,
-    "security": { "csp": null }
+    "security": {
+      "csp": "default-src 'self' http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:*; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:*; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'"
+    }
   },
   "bundle": {
     "active": true,
@@ -20,7 +22,6 @@
     "category": "DeveloperTool",
     "shortDescription": "Corpus-to-character pipeline",
     "longDescription": "Synthesize a fine-tuning dataset in a target voice, dedup it, triage it, assemble it, QLoRA-train a base model, and deploy via Ollama — a GUI over the same engine the CLI uses.",
-    "externalBin": [],
     "resources": {
       "../sidecar/dist/voicepipe-serve": "voicepipe-serve"
     }

@@ -18,7 +18,17 @@ done
 [ -n "$PYI" ] || { echo "pyinstaller not found (looked in $VENV/{bin,Scripts}/ and PATH) — run: pip install pyinstaller"; exit 1; }
 
 rm -rf "$HERE/sidecar/dist" "$HERE/sidecar/build" "$HERE/sidecar/voicepipe-serve.spec"
-"$PYI" --noconfirm --clean --onedir --name voicepipe-serve \
+
+# --strip removes debug symbols from the embedded interpreter + .so/.dylib files; on macOS/Linux
+# this is a non-trivial size win for the shipped bundle. Skip on Windows where it's a no-op /
+# can fail without the GNU binutils strip in PATH.
+case "$(uname -s 2>/dev/null || true)" in
+  MINGW*|MSYS*|CYGWIN*) STRIP_FLAG="" ;;
+  *)                    STRIP_FLAG="--strip" ;;
+esac
+
+# shellcheck disable=SC2086  # STRIP_FLAG is a single optional arg or empty; intentional word-split
+"$PYI" --noconfirm --clean --onedir --name voicepipe-serve $STRIP_FLAG \
   --distpath "$HERE/sidecar/dist" --workpath "$HERE/sidecar/build" --specpath "$HERE/sidecar" \
   --paths "$REPO" \
   --collect-all pipeline \
@@ -28,4 +38,11 @@ rm -rf "$HERE/sidecar/dist" "$HERE/sidecar/build" "$HERE/sidecar/voicepipe-serve
   --exclude-module torch --exclude-module transformers --exclude-module peft --exclude-module trl \
   --exclude-module bitsandbytes --exclude-module datasets --exclude-module accelerate \
   "$HERE/sidecar/voicepipe_sidecar.py"
+
+# NOTE: Tauri's `bundle.externalBin` is the proper pattern for sidecar binaries (it does the
+# platform-triple renaming + signing on macOS/Windows). We DEFER it here because PyInstaller's
+# --onedir output is a directory, not a single binary, and externalBin doesn't natively wrap
+# directories. Switching to --onefile would resolve that but inflates cold-start by ~1-2s and
+# changes the resource-extract model — out of scope for this round. tauri.conf.json therefore
+# still ships the bundle via bundle.resources; revisit when codesigning / notarization is wired.
 echo "built: $HERE/sidecar/dist/voicepipe-serve/voicepipe-serve  ($(du -sh "$HERE/sidecar/dist/voicepipe-serve" | cut -f1))"
