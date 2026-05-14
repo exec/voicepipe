@@ -10,8 +10,12 @@ in the repo) is a chatbot in the voice of Francis E. Dec, Esq.
 
 ## Models built with voicepipe
 
-Both are public ollama tags — `ollama run <name>` to talk to either:
+All three are public ollama tags — `ollama run <name>` to talk to any of them:
 
+- [`execxd/mistral-nemo-12b-marcus-aurelius`](https://ollama.com/execxd/mistral-nemo-12b-marcus-aurelius)
+  — Mistral Nemo 12B QLoRA fine-tune, in the voice of Marcus Aurelius (121–180 CE), in the
+  register of George Long's 1862 *Meditations* translation. Aphoristic Stoic self-address;
+  cosmic perspective; second-person directives.
 - [`execxd/mistral-nemo-12b-oscar-wilde`](https://ollama.com/execxd/mistral-nemo-12b-oscar-wilde)
   — Mistral Nemo 12B QLoRA fine-tune, in the voice of Oscar Wilde (1854–1900). End-to-end
   validation of the pipeline on a fresh character; the full project ships in
