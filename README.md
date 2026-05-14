@@ -1,12 +1,4 @@
-# voicepipe
-
-A corpus-to-character pipeline. Point it at a corpus (a body of writing in a distinctive
-voice), and it walks through: propose prompt categories → synthesize a fine-tuning dataset
-in that voice → dedup it → triage it with an LLM judge → assemble train/val → QLoRA-train a
-base model → deploy as an Ollama model. There's a CLI (`voicepipe <stage> --project DIR`) and
-a local web GUI (`voicepipe serve`) — both drive the *same* engine. A fully-worked example
-project ships in `examples/oscar-wilde/`; the original proof-of-concept (`scratch/dec-bot/`, not
-in the repo) is a chatbot in the voice of Francis E. Dec, Esq.
+<p align="center"><img src="header.png" alt="voicepipe — a corpus-to-character pipeline"></p>
 
 ## Models built with voicepipe
 
