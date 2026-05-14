@@ -502,21 +502,16 @@ _PUT_FILE_MAX_BYTES = 1 * 1024 * 1024  # 1 MiB
 def create_app(roots: list[Path], *, auth_token: str | None = None, auth_required: bool = False,
                bind_host: str | None = None) -> FastAPI:
     app = FastAPI(title="voicepipe", version="0.1.0")
-    # CORS: the web UI is same-origin (served by this very process), so wildcards aren't needed.
-    # On loopback we permit any origin (a stale tab on a different port; the desktop sidecar
-    # reaches us by IP+port that may not be `http://localhost`). Bound non-loopback, we lock down
-    # to same-origin only — no `*`, no credentials cross-site.
-    is_loopback_bind = bind_host in (None, "127.0.0.1", "::1", "localhost")
-    if is_loopback_bind:
-        app.add_middleware(CORSMiddleware,
-                           allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:[0-9]+)?$",
-                           allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-                           allow_headers=["Authorization", "Content-Type", "X-Auth-Token"])
-    else:
-        # Same-origin only — UI is served from this server. No cross-origin browsers expected.
-        app.add_middleware(CORSMiddleware, allow_origins=[],
-                           allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-                           allow_headers=["Authorization", "Content-Type", "X-Auth-Token"])
+    # CORS: always allow loopback origins, regardless of bind. The web UI is same-origin (served
+    # by this process) when accessed locally, AND a remote worker's legitimate cross-origin caller
+    # is *also* a loopback origin — the user's local GUI calling out to a public worker. Locking
+    # this down to same-origin-only when bound non-loopback breaks the remote-engine flow without
+    # any security benefit (the bearer token, not the origin, is the auth gate). No wildcards, no
+    # credentials cross-site — just loopback origins, always.
+    app.add_middleware(CORSMiddleware,
+                       allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:[0-9]+)?$",
+                       allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+                       allow_headers=["Authorization", "Content-Type", "X-Auth-Token"])
     reg = Registry(roots)
     mgr = jobsmod.JobManager()
     mgr.scan([d for _, d in reg.all()])
