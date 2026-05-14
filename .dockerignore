@@ -1,0 +1,10 @@
+# Keep the build context lean. Only pyproject.toml, constraints-train.txt,
+# and pipeline/ are needed by the Dockerfile; everything else is excluded.
+*
+!pyproject.toml
+!constraints-train.txt
+!pipeline
+pipeline/__pycache__
+pipeline/*/__pycache__
+*.pyc
+*.pyo
