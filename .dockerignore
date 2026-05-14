@@ -1,10 +1,36 @@
-# Keep the build context lean. Only pyproject.toml, constraints-train.txt,
-# and pipeline/ are needed by the Dockerfile; everything else is excluded.
-*
-!pyproject.toml
-!constraints-train.txt
-!pipeline
-pipeline/__pycache__
-pipeline/*/__pycache__
+# Exclude everything not needed for `docker build -f deploy/docker/Dockerfile .`.
+# The Dockerfile copies pyproject.toml, constraints-train.txt, pipeline/, and
+# deploy/docker/entrypoint.sh. Everything else is excluded by name to keep the
+# build context small and avoid leaking working data into the image.
+
+# Source-control / virtualenv / build artifacts
+.git/
+.venv/
+venv/
+__pycache__/
 *.pyc
 *.pyo
+*.egg-info/
+build/
+dist/
+target/
+node_modules/
+
+# voicepipe per-project working data (datasets, trained adapters, etc.)
+scratch/
+projects/
+
+# Heavyweight directories not used by the worker image
+desktop/
+examples/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+*.log
+
+# Large artifacts that should never enter the image
+*.gguf
+*.safetensors
+*.bin
