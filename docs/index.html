@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>voicepipe — a corpus-to-character pipeline</title>
+  <meta name="description" content="Point voicepipe at a corpus in a distinctive voice — it walks through categorize → synthesize → dedup → triage → assemble → QLoRA-train → deploy to Ollama." />
+  <meta property="og:title" content="voicepipe — a corpus-to-character pipeline" />
+  <meta property="og:description" content="Synthesize, dedup, triage, assemble, QLoRA-train, deploy. CLI + local web GUI + Tauri desktop app." />
+  <meta property="og:url" content="https://exec.github.io/voicepipe/" />
+  <meta property="og:type" content="website" />
+  <meta name="theme-color" content="#000000" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; }
+  </style>
+</head>
+<body class="min-h-screen bg-black text-white overflow-x-hidden">
+
+  <div class="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_top_left,_rgba(90,120,255,0.22),_transparent_35%),radial-gradient(circle_at_bottom_right,_rgba(80,120,255,0.14),_transparent_35%)]"></div>
+
+  <main class="relative z-10 max-w-7xl mx-auto px-6 py-10 md:px-10 lg:px-16">
+
+    <!-- nav -->
+    <nav class="flex items-center justify-between mb-20">
+      <div class="flex items-center gap-4">
+        <div class="w-12 h-12 rounded-2xl bg-[#0d1220] border border-white/10 flex items-center justify-center shadow-2xl shadow-blue-500/10">
+          <div class="flex gap-2">
+            <div class="w-4 h-8 rounded-l-full bg-gradient-to-b from-blue-200 to-blue-500"></div>
+            <div class="w-4 h-8 rounded-r-full bg-gradient-to-b from-blue-300 to-blue-600"></div>
+          </div>
+        </div>
+        <div>
+          <div class="text-2xl font-semibold tracking-tight">voicepipe</div>
+          <div class="text-xs text-white/40">corpus → character</div>
+        </div>
+      </div>
+      <div class="hidden md:flex items-center gap-4 text-sm text-white/60">
+        <a href="#pipeline" class="hover:text-white transition">Pipeline</a>
+        <a href="#models" class="hover:text-white transition">Models</a>
+        <a href="#cli" class="hover:text-white transition">CLI</a>
+        <a href="https://github.com/exec/voicepipe" class="px-4 py-2 rounded-xl bg-blue-500 hover:bg-blue-400 transition text-white font-medium shadow-lg shadow-blue-500/30">GitHub</a>
+      </div>
+    </nav>
+
+    <!-- hero -->
+    <section id="pipeline" class="grid lg:grid-cols-2 gap-16 items-center mb-32">
+      <div>
+        <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-blue-500/20 bg-blue-500/10 text-blue-300 text-sm mb-6">
+          <span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
+          End-to-end character model pipeline
+        </div>
+        <h1 class="text-5xl md:text-7xl font-semibold tracking-tight leading-[0.95] mb-8">
+          A corpus-to-character pipeline.
+        </h1>
+        <p class="text-xl text-white/70 leading-relaxed max-w-2xl mb-8">
+          Point it at a body of writing in a distinctive voice and voicepipe walks all the way through:
+        </p>
+        <div class="flex flex-wrap gap-3 mb-10">
+          <div class="px-4 py-2 rounded-xl border border-white/10 bg-white/[0.03] backdrop-blur-sm text-white/80 shadow-lg">categorize</div>
+          <div class="px-4 py-2 rounded-xl border border-white/10 bg-white/[0.03] backdrop-blur-sm text-white/80 shadow-lg">synthesize</div>
+          <div class="px-4 py-2 rounded-xl border border-white/10 bg-white/[0.03] backdrop-blur-sm text-white/80 shadow-lg">dedup</div>
+          <div class="px-4 py-2 rounded-xl border border-white/10 bg-white/[0.03] backdrop-blur-sm text-white/80 shadow-lg">triage</div>
+          <div class="px-4 py-2 rounded-xl border border-white/10 bg-white/[0.03] backdrop-blur-sm text-white/80 shadow-lg">assemble</div>
+          <div class="px-4 py-2 rounded-xl border border-white/10 bg-white/[0.03] backdrop-blur-sm text-white/80 shadow-lg">train</div>
+          <div class="px-4 py-2 rounded-xl border border-white/10 bg-white/[0.03] backdrop-blur-sm text-white/80 shadow-lg">deploy</div>
+        </div>
+        <div class="flex flex-col sm:flex-row gap-4">
+          <a href="https://github.com/exec/voicepipe" class="px-6 py-4 rounded-2xl bg-blue-500 hover:bg-blue-400 transition text-lg font-medium shadow-2xl shadow-blue-500/30 text-center">View on GitHub</a>
+          <a href="#install" class="px-6 py-4 rounded-2xl border border-white/10 bg-white/[0.03] hover:bg-white/[0.06] transition text-lg text-white/80 text-center">Get started</a>
+        </div>
+      </div>
+
+      <!-- mocked GUI panel -->
+      <div class="relative">
+        <div class="absolute -inset-8 bg-blue-500/10 blur-3xl rounded-full"></div>
+        <div class="relative rounded-[32px] border border-white/10 bg-[#070b14]/90 backdrop-blur-xl shadow-2xl overflow-hidden">
+          <div class="flex items-center justify-between px-5 py-4 border-b border-white/10 bg-white/[0.02]">
+            <div class="flex gap-2">
+              <div class="w-3 h-3 rounded-full bg-red-400"></div>
+              <div class="w-3 h-3 rounded-full bg-yellow-400"></div>
+              <div class="w-3 h-3 rounded-full bg-green-400"></div>
+            </div>
+            <div class="flex items-center gap-2 text-white/70 text-sm">
+              <span class="w-2 h-2 rounded-full bg-red-400"></span> torch
+              <span class="w-2 h-2 rounded-full bg-orange-400 ml-2"></span> ollama
+              <span class="w-2 h-2 rounded-full bg-green-400 ml-2"></span> key
+            </div>
+          </div>
+          <div class="p-6 space-y-5">
+            <div>
+              <div class="text-3xl font-semibold mb-3">Oscar Wilde</div>
+              <p class="text-white/60 leading-relaxed">Languid, paradoxical, epigrammatic — every sentence a polished inversion of a platitude.</p>
+            </div>
+
+            <!-- stage rows: first 5 completed (green), last 2 pending (white) -->
+            <div class="flex items-center justify-between rounded-2xl border border-white/10 bg-white/[0.02] px-5 py-4">
+              <div class="flex items-center gap-4">
+                <div class="w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium bg-green-500/15 text-green-300 border border-green-500/20">1</div>
+                <div>
+                  <div class="font-medium text-lg">categorize</div>
+                  <div class="text-white/50 text-sm">Propose weighted prompt categories</div>
+                </div>
+              </div>
+              <button class="px-4 py-2 rounded-xl bg-blue-500 hover:bg-blue-400 transition text-sm font-medium shadow-lg shadow-blue-500/20">Run</button>
+            </div>
+            <div class="flex items-center justify-between rounded-2xl border border-white/10 bg-white/[0.02] px-5 py-4">
+              <div class="flex items-center gap-4">
+                <div class="w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium bg-green-500/15 text-green-300 border border-green-500/20">2</div>
+                <div>
+                  <div class="font-medium text-lg">synthesize</div>
+                  <div class="text-white/50 text-sm">Generate response pairs in batches</div>
+                </div>
+              </div>
+              <button class="px-4 py-2 rounded-xl bg-blue-500 hover:bg-blue-400 transition text-sm font-medium shadow-lg shadow-blue-500/20">Run</button>
+            </div>
+            <div class="flex items-center justify-between rounded-2xl border border-white/10 bg-white/[0.02] px-5 py-4">
+              <div class="flex items-center gap-4">
+                <div class="w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium bg-green-500/15 text-green-300 border border-green-500/20">3</div>
+                <div>
+                  <div class="font-medium text-lg">dedup</div>
+                  <div class="text-white/50 text-sm">Cosine dedup + phrase caps</div>
+                </div>
+              </div>
+              <button class="px-4 py-2 rounded-xl bg-blue-500 hover:bg-blue-400 transition text-sm font-medium shadow-lg shadow-blue-500/20">Run</button>
+            </div>
+            <div class="flex items-center justify-between rounded-2xl border border-white/10 bg-white/[0.02] px-5 py-4">
+              <div class="flex items-center gap-4">
+                <div class="w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium bg-green-500/15 text-green-300 border border-green-500/20">4</div>
+                <div>
+                  <div class="font-medium text-lg">triage</div>
+                  <div class="text-white/50 text-sm">LLM judge scoring + policy flags</div>
+                </div>
+              </div>
+              <button class="px-4 py-2 rounded-xl bg-blue-500 hover:bg-blue-400 transition text-sm font-medium shadow-lg shadow-blue-500/20">Run</button>
+            </div>
+            <div class="flex items-center justify-between rounded-2xl border border-white/10 bg-white/[0.02] px-5 py-4">
+              <div class="flex items-center gap-4">
+                <div class="w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium bg-green-500/15 text-green-300 border border-green-500/20">5</div>
+                <div>
+                  <div class="font-medium text-lg">assemble</div>
+                  <div class="text-white/50 text-sm">Build train / validation sets</div>
+                </div>
+              </div>
+              <button class="px-4 py-2 rounded-xl bg-blue-500 hover:bg-blue-400 transition text-sm font-medium shadow-lg shadow-blue-500/20">Run</button>
+            </div>
+            <div class="flex items-center justify-between rounded-2xl border border-white/10 bg-white/[0.02] px-5 py-4">
+              <div class="flex items-center gap-4">
+                <div class="w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium bg-white/5 text-white/60 border border-white/10">6</div>
+                <div>
+                  <div class="font-medium text-lg">train</div>
+                  <div class="text-white/50 text-sm">QLoRA fine-tune the base model</div>
+                </div>
+              </div>
+              <button class="px-4 py-2 rounded-xl bg-blue-500 hover:bg-blue-400 transition text-sm font-medium shadow-lg shadow-blue-500/20">Run</button>
+            </div>
+            <div class="flex items-center justify-between rounded-2xl border border-white/10 bg-white/[0.02] px-5 py-4">
+              <div class="flex items-center gap-4">
+                <div class="w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium bg-white/5 text-white/60 border border-white/10">7</div>
+                <div>
+                  <div class="font-medium text-lg">deploy</div>
+                  <div class="text-white/50 text-sm">GGUF → Modelfile → ollama push</div>
+                </div>
+              </div>
+              <button class="px-4 py-2 rounded-xl bg-blue-500 hover:bg-blue-400 transition text-sm font-medium shadow-lg shadow-blue-500/20">Run</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- features -->
+    <section class="grid md:grid-cols-4 gap-5 mb-32">
+      <div class="rounded-3xl border border-white/10 bg-white/[0.03] p-6 backdrop-blur-sm">
+        <div class="w-12 h-12 rounded-2xl bg-blue-500/10 border border-blue-500/20 mb-5"></div>
+        <div class="text-xl font-medium mb-2">Config-driven</div>
+        <div class="text-white/55 leading-relaxed">Everything lives in <span class="font-mono text-white/70">project.toml</span></div>
+      </div>
+      <div class="rounded-3xl border border-white/10 bg-white/[0.03] p-6 backdrop-blur-sm">
+        <div class="w-12 h-12 rounded-2xl bg-blue-500/10 border border-blue-500/20 mb-5"></div>
+        <div class="text-xl font-medium mb-2">CLI + GUI</div>
+        <div class="text-white/55 leading-relaxed">One engine, two interfaces</div>
+      </div>
+      <div class="rounded-3xl border border-white/10 bg-white/[0.03] p-6 backdrop-blur-sm">
+        <div class="w-12 h-12 rounded-2xl bg-blue-500/10 border border-blue-500/20 mb-5"></div>
+        <div class="text-xl font-medium mb-2">Local &amp; private</div>
+        <div class="text-white/55 leading-relaxed">You control the data</div>
+      </div>
+      <div class="rounded-3xl border border-white/10 bg-white/[0.03] p-6 backdrop-blur-sm">
+        <div class="w-12 h-12 rounded-2xl bg-blue-500/10 border border-blue-500/20 mb-5"></div>
+        <div class="text-xl font-medium mb-2">End-to-end</div>
+        <div class="text-white/55 leading-relaxed">Corpus → model deployment</div>
+      </div>
+    </section>
+
+    <!-- CLI + GUI -->
+    <section id="cli" class="grid lg:grid-cols-2 gap-8 mb-32">
+      <div class="rounded-[32px] border border-white/10 bg-[#090d18]/90 p-8 shadow-2xl">
+        <div class="text-blue-300 text-sm mb-3">CLI</div>
+        <div class="text-3xl font-semibold mb-6">The same engine, in your terminal.</div>
+        <div class="rounded-2xl bg-black border border-white/10 p-5 font-mono text-green-300 overflow-x-auto text-sm space-y-1">
+          <div>$ voicepipe new my-character</div>
+          <div>$ voicepipe synthesize --project my-character</div>
+          <div>$ voicepipe train --project my-character</div>
+          <div>$ voicepipe deploy --project my-character</div>
+        </div>
+      </div>
+      <div class="rounded-[32px] border border-white/10 bg-[#090d18]/90 p-8 shadow-2xl">
+        <div class="text-blue-300 text-sm mb-3">WEB GUI</div>
+        <div class="text-3xl font-semibold mb-6">Local control server + desktop app.</div>
+        <div class="space-y-4 text-white/65 leading-relaxed text-lg">
+          <p><span class="font-mono text-white/80">voicepipe serve</span> runs a FastAPI control server with a full web UI and SSE job stream.</p>
+          <p>Run locally, connect to a remote CUDA box, or package it as a Tauri desktop app.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- models -->
+    <section id="models" class="mb-32">
+      <div class="text-sm text-blue-300 mb-3">MODELS BUILT WITH VOICEPIPE</div>
+      <h2 class="text-5xl font-semibold tracking-tight mb-12">Public Ollama models.</h2>
+      <div class="grid lg:grid-cols-3 gap-6">
+
+        <a href="https://ollama.com/execxd/mistral-nemo-12b-marcus-aurelius" class="rounded-[28px] border border-white/10 bg-white/[0.03] p-7 backdrop-blur-sm hover:bg-white/[0.06] transition block">
+          <div class="text-2xl font-semibold mb-4">Marcus Aurelius</div>
+          <p class="text-white/60 leading-relaxed mb-6">Stoic self-address in the register of George Long's 1862 <em>Meditations</em> translation. Aphoristic, cosmic-perspective, second-person directive.</p>
+          <div class="inline-flex items-center gap-2 text-blue-300 font-mono text-sm">
+            ollama run
+            <span class="px-2 py-1 rounded-lg bg-blue-500/10 border border-blue-500/20">execxd/mistral-nemo-12b-marcus-aurelius</span>
+          </div>
+        </a>
+
+        <a href="https://ollama.com/execxd/mistral-nemo-12b-oscar-wilde" class="rounded-[28px] border border-white/10 bg-white/[0.03] p-7 backdrop-blur-sm hover:bg-white/[0.06] transition block">
+          <div class="text-2xl font-semibold mb-4">Oscar Wilde</div>
+          <p class="text-white/60 leading-relaxed mb-6">Paradoxical wit, epigrams, polished inversions, art-for-art's-sake elegance. The end-to-end pipeline validated on a fresh character.</p>
+          <div class="inline-flex items-center gap-2 text-blue-300 font-mono text-sm">
+            ollama run
+            <span class="px-2 py-1 rounded-lg bg-blue-500/10 border border-blue-500/20">execxd/mistral-nemo-12b-oscar-wilde</span>
+          </div>
+        </a>
+
+        <a href="https://ollama.com/execxd/mistral-nemo-12b-francis-e-dec" class="rounded-[28px] border border-white/10 bg-white/[0.03] p-7 backdrop-blur-sm hover:bg-white/[0.06] transition block">
+          <div class="text-2xl font-semibold mb-4">Francis E. Dec</div>
+          <p class="text-white/60 leading-relaxed mb-6">The original proof-of-concept that drove the engine's design. Disbarred-lawyer outsider literature, cleaned of slurs.</p>
+          <div class="inline-flex items-center gap-2 text-blue-300 font-mono text-sm">
+            ollama run
+            <span class="px-2 py-1 rounded-lg bg-blue-500/10 border border-blue-500/20">execxd/mistral-nemo-12b-francis-e-dec</span>
+          </div>
+        </a>
+
+      </div>
+    </section>
+
+    <!-- install / CTA -->
+    <section id="install" class="rounded-[40px] border border-white/10 bg-gradient-to-b from-white/[0.05] to-white/[0.02] p-10 md:p-14 mb-20 overflow-hidden relative">
+      <div class="absolute inset-0 bg-[radial-gradient(circle_at_top_right,_rgba(80,120,255,0.18),_transparent_35%)]"></div>
+      <div class="relative z-10 max-w-4xl">
+        <div class="text-sm text-blue-300 mb-4">GET STARTED</div>
+        <h2 class="text-5xl font-semibold tracking-tight mb-6">Install voicepipe.</h2>
+        <p class="text-xl text-white/65 leading-relaxed mb-8 max-w-3xl">
+          Use the desktop app or install from source to get the CLI, training pipeline, deploy tooling, and local web GUI.
+        </p>
+        <div class="rounded-3xl border border-white/10 bg-black/40 p-6 font-mono text-green-300 text-sm overflow-x-auto mb-8 space-y-1">
+          <div>$ pip install -e ".[gui]"</div>
+          <div>$ voicepipe new my-character</div>
+          <div>$ voicepipe serve</div>
+        </div>
+        <div class="flex flex-col sm:flex-row gap-4">
+          <a href="https://github.com/exec/voicepipe" class="px-6 py-4 rounded-2xl bg-blue-500 hover:bg-blue-400 transition text-lg font-medium shadow-2xl shadow-blue-500/30 text-center">Open GitHub Repository</a>
+          <a href="https://ghcr.io/exec/voicepipe-worker" class="px-6 py-4 rounded-2xl border border-white/10 bg-white/[0.03] hover:bg-white/[0.06] transition text-lg text-white/80 text-center">ghcr.io/exec/voicepipe-worker</a>
+        </div>
+      </div>
+    </section>
+
+    <footer class="text-center text-white/40 text-sm py-10 border-t border-white/5">
+      voicepipe — built with itself · <a href="https://github.com/exec/voicepipe" class="hover:text-white transition">github.com/exec/voicepipe</a>
+    </footer>
+
+  </main>
+
+</body>
+</html>
