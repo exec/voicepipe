@@ -13,6 +13,12 @@ This module has no web dependency; `pipeline.server` wraps it. It also has no `p
 import-time cost — stages are run as subprocesses, never imported here.
 """
 
+# Lazy annotations: `JobManager.list` (the public listing method) shadows the builtin `list`
+# inside the class body, which would otherwise make later annotations like `list[str]` resolve
+# to the method object at class-definition time → `TypeError: 'function' object is not
+# subscriptable`. PEP 563 makes annotations strings, so the shadow can't fire.
+from __future__ import annotations
+
 import json
 import os
 import re
