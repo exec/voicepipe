@@ -149,3 +149,18 @@ model is held to. The `character` template seeds them as defaults for any new pr
 For voices that touch sensitive material — like the dec-bot proof-of-concept, whose source
 corpus is paranoid-schizophrenic writing from the 1970s–80s — clean the corpus upstream and
 add a deploy-time output moderation layer (see `serve/discord_bot.py` for the dec-bot's).
+
+## Research applications
+
+voicepipe is, primarily, a creative-writing pipeline. The same engine generalizes to a broader
+spectrum of *research* applications — detection ("is this text human-authored or
+voicepipe-emulated?"), watermarking and provenance, organizational and authorial style
+modeling, synthetic-data generation for red/blue exercises, and impersonation-defense
+tooling. We're intellectually honest that the technology is dual-use; the literary framing is
+where the project lives and is evaluated, but pretending the dual-use surface doesn't exist
+wouldn't change anything except the depth of the conversation.
+
+A natural follow-up research question sits one step away from voicepipe: can ML adversaries
+reliably detect voicepipe-finetuned output from genuinely-authored or generic-LLM text, and on
+what features? If you're working on that question — or any of the others above — drop a note
+in [issues](https://github.com/exec/voicepipe/issues); we'd love to compare findings.
