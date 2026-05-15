@@ -45,29 +45,37 @@ if _known.gpu is not None:
 import time
 import traceback
 
-import torch
-import transformers
-from datasets import Dataset
-from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TrainerCallback
-from trl import DataCollatorForCompletionOnlyLM, SFTConfig, SFTTrainer
-
 from pipeline import events
 
+# Heavy ML deps — only needed to actually run training, not to render `--help`. Deferred
+# behind a guard so `voicepipe train --help` works without the [train] extra installed.
+# `_EventsCallback` and `_DTYPE_KWARG` reference imported symbols at definition time, so they
+# live inside the guard too; the stage's functions reference these names only at call time.
+try:
+    import torch
+    import transformers
+    from datasets import Dataset
+    from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TrainerCallback
+    from trl import DataCollatorForCompletionOnlyLM, SFTConfig, SFTTrainer
+    _HEAVY_OK = True
+except ImportError:
+    _HEAVY_OK = False
 
-class _EventsCallback(TrainerCallback):
-    """Emits a `metric` + `progress` event on every trainer log step."""
-    def on_log(self, args, state, control, logs=None, **kwargs):
-        if not logs:
-            return
-        numeric = {k: v for k, v in logs.items() if isinstance(v, (int, float)) and k not in ("epoch", "step")}
-        events.metric(step=state.global_step, epoch=round(state.epoch, 4) if state.epoch is not None else None, **numeric)
-        events.progress(current=state.global_step, total=(state.max_steps or None), unit="steps")
+if _HEAVY_OK:
+    class _EventsCallback(TrainerCallback):
+        """Emits a `metric` + `progress` event on every trainer log step."""
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            if not logs:
+                return
+            numeric = {k: v for k, v in logs.items() if isinstance(v, (int, float)) and k not in ("epoch", "step")}
+            events.metric(step=state.global_step, epoch=round(state.epoch, 4) if state.epoch is not None else None, **numeric)
+            events.progress(current=state.global_step, total=(state.max_steps or None), unit="steps")
 
-# transformers 5.x renamed the from_pretrained dtype kwarg: torch_dtype -> dtype.
-# Brittle for dev/RC versions ("5.0.0.dev0") but split-and-int handles those; truly exotic
-# version strings would raise — that's an acceptable failure mode for a build-time pin.
-_DTYPE_KWARG = "dtype" if int(transformers.__version__.split(".")[0]) >= 5 else "torch_dtype"
+    # transformers 5.x renamed the from_pretrained dtype kwarg: torch_dtype -> dtype.
+    # Brittle for dev/RC versions ("5.0.0.dev0") but split-and-int handles those; truly exotic
+    # version strings would raise — that's an acceptable failure mode for a build-time pin.
+    _DTYPE_KWARG = "dtype" if int(transformers.__version__.split(".")[0]) >= 5 else "torch_dtype"
 
 
 def _is_quantized_4bit(model) -> bool:
@@ -215,6 +223,11 @@ def main():
                          "pass 'auto' to pick the latest out_dir/checkpoint-* automatically")
     ap.add_argument("--smoke", action="store_true", help="10-step dry run: tiny subset, verifies load + GPU + pipeline")
     args = ap.parse_args()
+
+    if not _HEAVY_OK:
+        raise SystemExit("voicepipe train needs the training extra — `pip install -e '.[train]'` "
+                         "(plus torch from the PyTorch CUDA index; see constraints-train.txt).")
+
     events.set_stage("train")
 
     cfg = _resolve_config(args)

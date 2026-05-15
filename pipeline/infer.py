@@ -18,9 +18,15 @@ import argparse
 import json
 from pathlib import Path
 
-import torch
-from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
+# Heavy ML deps — only needed to actually run inference, not to render `--help`. Deferred
+# behind a guard so `voicepipe infer --help` works without the [train] extra installed.
+try:
+    import torch
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    _HEAVY_OK = True
+except ImportError:
+    _HEAVY_OK = False
 
 HERE = Path(__file__).resolve().parent
 _DEFAULT_BASE = "unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit"
@@ -65,6 +71,10 @@ def main():
     ap.add_argument("--system", default=None, help="override the system prompt (or '' for none)")
     ap.add_argument("--max-new-tokens", type=int, default=320)
     args = ap.parse_args()
+
+    if not _HEAVY_OK:
+        raise SystemExit("voicepipe infer needs the training extra — `pip install -e '.[train]'` "
+                         "(plus torch from the PyTorch CUDA index; see constraints-train.txt).")
 
     base_model = args.base or _DEFAULT_BASE
     adapter_dir = Path(args.adapter) if args.adapter else (HERE / "checkpoints" / "final")
