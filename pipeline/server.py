@@ -38,6 +38,7 @@ try:
 except ImportError as e:  # pragma: no cover
     raise SystemExit("the GUI server needs FastAPI + uvicorn — `pip install -e .[gui]`") from e
 
+from pipeline import __version__ as _VERSION
 from pipeline import jobs as jobsmod
 from pipeline import scaffold
 from pipeline import util as utilmod
@@ -501,7 +502,7 @@ _PUT_FILE_MAX_BYTES = 1 * 1024 * 1024  # 1 MiB
 
 def create_app(roots: list[Path], *, auth_token: str | None = None, auth_required: bool = False,
                bind_host: str | None = None) -> FastAPI:
-    app = FastAPI(title="voicepipe", version="0.1.0")
+    app = FastAPI(title="voicepipe", version=_VERSION)
     # CORS: always allow loopback origins, regardless of bind. The web UI is same-origin (served
     # by this process) when accessed locally, AND a remote worker's legitimate cross-origin caller
     # is *also* a loopback origin — the user's local GUI calling out to a public worker. Locking
@@ -590,7 +591,7 @@ def create_app(roots: list[Path], *, auth_token: str | None = None, auth_require
         except Exception:
             has_torch = False
         import shutil as _sh
-        return {"ok": True, "version": "0.1.0", "python": sys.version.split()[0],
+        return {"ok": True, "version": _VERSION, "python": sys.version.split()[0],
                 "has_torch": has_torch, "has_ollama": bool(_sh.which("ollama")),
                 "ollama_api_key_set": bool(os.environ.get("OLLAMA_API_KEY")),
                 "auth_required": need_auth, "roots": [str(r) for r in reg.roots]}

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "voicepipe"
-version = "0.1.0"
+version = "0.1.3"
 description = "Corpus-to-character pipeline: synthesize a fine-tuning dataset in a target voice, dedup it, triage it, assemble it, train a QLoRA adapter, and deploy via Ollama."
 readme = "README.md"
 license = { file = "LICENSE" }
