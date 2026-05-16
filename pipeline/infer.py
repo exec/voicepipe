@@ -63,14 +63,15 @@ def _load_prompts(path: Path):
     return out or _DEFAULT_PROMPTS
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--project", default=None, help="project dir: take base model / system prompt / eval prompts from it")
-    ap.add_argument("--base", default=None, help="override base model (pre-quantized 4-bit HF id)")
-    ap.add_argument("--adapter", default=None, help="LoRA adapter dir (default: <project>/dataset/adapter/final, or ./checkpoints/final)")
-    ap.add_argument("--system", default=None, help="override the system prompt (or '' for none)")
-    ap.add_argument("--max-new-tokens", type=int, default=320)
-    args = ap.parse_args()
+def main(args=None):
+    if args is None:
+        ap = argparse.ArgumentParser()
+        ap.add_argument("--project", default=None, help="project dir: take base model / system prompt / eval prompts from it")
+        ap.add_argument("--base", default=None, help="override base model (pre-quantized 4-bit HF id)")
+        ap.add_argument("--adapter", default=None, help="LoRA adapter dir (default: <project>/dataset/adapter/final, or ./checkpoints/final)")
+        ap.add_argument("--system", default=None, help="override the system prompt (or '' for none)")
+        ap.add_argument("--max-new-tokens", type=int, default=320)
+        args = ap.parse_args()
 
     if not _HEAVY_OK:
         raise SystemExit("voicepipe infer needs the training extra — `pip install -e '.[train]'` "

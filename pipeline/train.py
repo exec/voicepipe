@@ -200,29 +200,30 @@ def _resolve_config(args):
     }
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--gpu", type=int, default=None, help="pin to this physical GPU (sets CUDA_VISIBLE_DEVICES); for running two trainings on a 2-GPU box")
-    ap.add_argument("--project", default=None, help="project directory (reads project.toml → TrainConfig + dataset paths)")
-    ap.add_argument("--model", default=None, help="override: pre-quantized 4-bit base model on HF Hub")
-    ap.add_argument("--train-jsonl", default=None, help="override path to train.jsonl")
-    ap.add_argument("--val-jsonl", default=None, help="override path to val.jsonl")
-    ap.add_argument("--out-dir", default=None, help="override adapter output directory")
-    ap.add_argument("--epochs", type=float, default=None)
-    ap.add_argument("--batch-size", type=int, default=None)
-    ap.add_argument("--grad-accum", type=int, default=None)
-    ap.add_argument("--lr", type=float, default=None)
-    ap.add_argument("--lora-r", type=int, default=None)
-    ap.add_argument("--lora-alpha", type=int, default=None)
-    ap.add_argument("--lora-dropout", type=float, default=None)
-    ap.add_argument("--max-seq-len", type=int, default=None)
-    ap.add_argument("--optim", default=None)
-    ap.add_argument("--resume-adapter", default=None, help="continue training an existing LoRA adapter dir (weights only — discards optimizer/scheduler/RNG state)")
-    ap.add_argument("--resume-from-checkpoint", default=None,
-                    help="resume optimizer+scheduler+RNG state from a Trainer checkpoint dir; "
-                         "pass 'auto' to pick the latest out_dir/checkpoint-* automatically")
-    ap.add_argument("--smoke", action="store_true", help="10-step dry run: tiny subset, verifies load + GPU + pipeline")
-    args = ap.parse_args()
+def main(args=None):
+    if args is None:
+        ap = argparse.ArgumentParser()
+        ap.add_argument("--gpu", type=int, default=None, help="pin to this physical GPU (sets CUDA_VISIBLE_DEVICES); for running two trainings on a 2-GPU box")
+        ap.add_argument("--project", default=None, help="project directory (reads project.toml → TrainConfig + dataset paths)")
+        ap.add_argument("--model", default=None, help="override: pre-quantized 4-bit base model on HF Hub")
+        ap.add_argument("--train-jsonl", default=None, help="override path to train.jsonl")
+        ap.add_argument("--val-jsonl", default=None, help="override path to val.jsonl")
+        ap.add_argument("--out-dir", default=None, help="override adapter output directory")
+        ap.add_argument("--epochs", type=float, default=None)
+        ap.add_argument("--batch-size", type=int, default=None)
+        ap.add_argument("--grad-accum", type=int, default=None)
+        ap.add_argument("--lr", type=float, default=None)
+        ap.add_argument("--lora-r", type=int, default=None)
+        ap.add_argument("--lora-alpha", type=int, default=None)
+        ap.add_argument("--lora-dropout", type=float, default=None)
+        ap.add_argument("--max-seq-len", type=int, default=None)
+        ap.add_argument("--optim", default=None)
+        ap.add_argument("--resume-adapter", default=None, help="continue training an existing LoRA adapter dir (weights only — discards optimizer/scheduler/RNG state)")
+        ap.add_argument("--resume-from-checkpoint", default=None,
+                        help="resume optimizer+scheduler+RNG state from a Trainer checkpoint dir; "
+                             "pass 'auto' to pick the latest out_dir/checkpoint-* automatically")
+        ap.add_argument("--smoke", action="store_true", help="10-step dry run: tiny subset, verifies load + GPU + pipeline")
+        args = ap.parse_args()
 
     if not _HEAVY_OK:
         raise SystemExit("voicepipe train needs the training extra — `pip install -e '.[train]'` "

@@ -384,17 +384,18 @@ def write_batch_result(proj, result, out_dir: Path, manifest_path: Path) -> int:
 
 # ---------- driver ----------
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--project", required=True, help="project directory (reads project.toml)")
-    ap.add_argument("--target", type=int, default=None, help="override total-pairs target")
-    ap.add_argument("--pairs-per-batch", type=int, default=None)
-    ap.add_argument("--model", default=None)
-    ap.add_argument("--concurrency", type=int, default=None)
-    ap.add_argument("--mode", default=None, help="force every batch to this mode")
-    ap.add_argument("--no-balance-modes", action="store_true", help="weighted-random mode selection instead of round-robin")
-    ap.add_argument("--temperature", type=float, default=None)
-    args = ap.parse_args()
+def main(args=None):
+    if args is None:
+        ap = argparse.ArgumentParser()
+        ap.add_argument("--project", required=True, help="project directory (reads project.toml)")
+        ap.add_argument("--target", type=int, default=None, help="override total-pairs target")
+        ap.add_argument("--pairs-per-batch", type=int, default=None)
+        ap.add_argument("--model", default=None)
+        ap.add_argument("--concurrency", type=int, default=None)
+        ap.add_argument("--mode", default=None, help="force every batch to this mode")
+        ap.add_argument("--no-balance-modes", action="store_true", help="weighted-random mode selection instead of round-robin")
+        ap.add_argument("--temperature", type=float, default=None)
+        args = ap.parse_args()
     events.set_stage("synthesize")
 
     from pipeline.project import load_project, glossary_text, load_corpus, load_seeds

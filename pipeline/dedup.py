@@ -205,15 +205,16 @@ def downsample_closers(pairs: list, closers: list, seed: int = 42) -> list:
 
 # ---------- driver ----------
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--project", default=None, help="project directory (reads project.toml → DedupConfig)")
-    ap.add_argument("--raw-dir", default=None, help="override input dir of batch_*.jsonl")
-    ap.add_argument("--out", default=None, help="override output pairs.jsonl path")
-    ap.add_argument("--threshold", type=float, default=None, help="override cosine threshold")
-    ap.add_argument("--skip-embed", action="store_true", help="hash-only dedup")
-    ap.add_argument("--no-downsample", action="store_true", help="skip closer caps")
-    args = ap.parse_args()
+def main(args=None):
+    if args is None:
+        ap = argparse.ArgumentParser()
+        ap.add_argument("--project", default=None, help="project directory (reads project.toml → DedupConfig)")
+        ap.add_argument("--raw-dir", default=None, help="override input dir of batch_*.jsonl")
+        ap.add_argument("--out", default=None, help="override output pairs.jsonl path")
+        ap.add_argument("--threshold", type=float, default=None, help="override cosine threshold")
+        ap.add_argument("--skip-embed", action="store_true", help="hash-only dedup")
+        ap.add_argument("--no-downsample", action="store_true", help="skip closer caps")
+        args = ap.parse_args()
     events.set_stage("dedup")
 
     from pipeline.project import DedupConfig

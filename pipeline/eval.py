@@ -624,27 +624,28 @@ def write_markdown_pairwise(result: dict, path: Path) -> None:
 
 # ---------- driver ----------
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--project", default=None, help="project dir: defaults --model to its deploy.ollama_tag, --prompts to <project>/eval/prompts.jsonl, output to <project>/dataset/eval/, and loads eval/judge_rubric.md / eval/judge_pairwise.md if present (else falls back to built-in dec-bot defaults)")
-    ap.add_argument("--model", help="model name (absolute mode); resolved via the configured provider")
-    ap.add_argument("--compare", nargs=2, metavar=("A", "B"),
-                    help="Compare two models (pairwise mode)")
-    ap.add_argument("--judge", default="minimax-m2.7:cloud",
-                    help="model name used as judge")
-    ap.add_argument("--prompts", type=Path, default=None,
-                    help="JSONL with eval prompts (default: <project>/eval/prompts.jsonl)")
-    ap.add_argument("--system", default=None,
-                    help="Override the candidate's system prompt (default: model default)")
-    ap.add_argument("--temperature", type=float, default=0.7)
-    ap.add_argument("--max-tokens", type=int, default=500)
-    ap.add_argument("--concurrency", type=int, default=3,
-                    help="Parallel in-flight calls. 3 for cloud thinking-model judge; higher for local-only.")
-    ap.add_argument("--seed", type=int, default=42,
-                    help="Random seed for pairwise A/B flip ordering")
-    ap.add_argument("--tag", default=None,
-                    help="Tag for the output filename (default: model name or A-vs-B)")
-    args = ap.parse_args()
+def main(args=None):
+    if args is None:
+        ap = argparse.ArgumentParser()
+        ap.add_argument("--project", default=None, help="project dir: defaults --model to its deploy.ollama_tag, --prompts to <project>/eval/prompts.jsonl, output to <project>/dataset/eval/, and loads eval/judge_rubric.md / eval/judge_pairwise.md if present (else falls back to built-in dec-bot defaults)")
+        ap.add_argument("--model", help="model name (absolute mode); resolved via the configured provider")
+        ap.add_argument("--compare", nargs=2, metavar=("A", "B"),
+                        help="Compare two models (pairwise mode)")
+        ap.add_argument("--judge", default="minimax-m2.7:cloud",
+                        help="model name used as judge")
+        ap.add_argument("--prompts", type=Path, default=None,
+                        help="JSONL with eval prompts (default: <project>/eval/prompts.jsonl)")
+        ap.add_argument("--system", default=None,
+                        help="Override the candidate's system prompt (default: model default)")
+        ap.add_argument("--temperature", type=float, default=0.7)
+        ap.add_argument("--max-tokens", type=int, default=500)
+        ap.add_argument("--concurrency", type=int, default=3,
+                        help="Parallel in-flight calls. 3 for cloud thinking-model judge; higher for local-only.")
+        ap.add_argument("--seed", type=int, default=42,
+                        help="Random seed for pairwise A/B flip ordering")
+        ap.add_argument("--tag", default=None,
+                        help="Tag for the output filename (default: model name or A-vs-B)")
+        args = ap.parse_args()
     events.set_stage("eval")
 
     proj = None

@@ -955,23 +955,24 @@ def _token_looks_strong(tok: str) -> tuple[bool, str]:
     return True, ""
 
 
-def main(argv=None):
+def main(args=None):
     # Load the env file BEFORE argparse so --auth-token can take its default from
     # $VOICEPIPE_AUTH_TOKEN as written in ~/.config/voicepipe/env. (The argparse `default=`
     # expression is evaluated at parse time; we previously ran the file-load after that, which
     # silently lost env-file tokens whose value was set there and nowhere else.)
     _load_env_file()
-    ap = argparse.ArgumentParser(prog="voicepipe serve", description="run the voicepipe control server + web GUI")
-    ap.add_argument("--host", default="127.0.0.1", help="bind host (default 127.0.0.1; use 0.0.0.0 for remote)")
-    ap.add_argument("--port", type=int, default=8765)
-    ap.add_argument("--unix-socket", default=None, help="bind a Unix domain socket instead of host:port (no auth; for the native app)")
-    ap.add_argument("--auth-token", default=os.environ.get("VOICEPIPE_AUTH_TOKEN"),
-                    help="shared password for /v1/* over TCP (also $VOICEPIPE_AUTH_TOKEN). Required automatically for non-loopback hosts.")
-    ap.add_argument("--no-auth", action="store_true",
-                    help="never require auth, even if a token is in the env (the native desktop app passes this; trusted local use only).")
-    ap.add_argument("--root", action="append", default=None, help="project root to scan (repeatable). Default: cwd, ~/voicepipe-projects, ./projects, ./scratch")
-    ap.add_argument("--no-browser", action="store_true", help="don't try to open a browser")
-    args = ap.parse_args(argv if argv is not None else sys.argv[1:])
+    if args is None:
+        ap = argparse.ArgumentParser(prog="voicepipe serve", description="run the voicepipe control server + web GUI")
+        ap.add_argument("--host", default="127.0.0.1", help="bind host (default 127.0.0.1; use 0.0.0.0 for remote)")
+        ap.add_argument("--port", type=int, default=8765)
+        ap.add_argument("--unix-socket", default=None, help="bind a Unix domain socket instead of host:port (no auth; for the native app)")
+        ap.add_argument("--auth-token", default=os.environ.get("VOICEPIPE_AUTH_TOKEN"),
+                        help="shared password for /v1/* over TCP (also $VOICEPIPE_AUTH_TOKEN). Required automatically for non-loopback hosts.")
+        ap.add_argument("--no-auth", action="store_true",
+                        help="never require auth, even if a token is in the env (the native desktop app passes this; trusted local use only).")
+        ap.add_argument("--root", action="append", default=None, help="project root to scan (repeatable). Default: cwd, ~/voicepipe-projects, ./projects, ./scratch")
+        ap.add_argument("--no-browser", action="store_true", help="don't try to open a browser")
+        args = ap.parse_args(sys.argv[1:])
     _start_parent_watchdog()                           # exit if the desktop-shell parent dies (if VOICEPIPE_PARENT_PID set)
     if args.no_auth:
         args.auth_token = None                         # the native app passes --no-auth; ignore any ambient token

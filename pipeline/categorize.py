@@ -88,13 +88,14 @@ def _parse_array(text: str) -> list:
     return out
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--project", required=True, help="project directory")
-    ap.add_argument("--n", type=int, default=12, help="how many categories to propose")
-    ap.add_argument("--model", default=None, help="override the proposing model (default: project synthesis.model)")
-    ap.add_argument("--adopt", action="store_true", help="write the proposal into project.toml's `categories`")
-    args = ap.parse_args()
+def main(args=None):
+    if args is None:
+        ap = argparse.ArgumentParser()
+        ap.add_argument("--project", required=True, help="project directory")
+        ap.add_argument("--n", type=int, default=12, help="how many categories to propose")
+        ap.add_argument("--model", default=None, help="override the proposing model (default: project synthesis.model)")
+        ap.add_argument("--adopt", action="store_true", help="write the proposal into project.toml's `categories`")
+        args = ap.parse_args()
     events.set_stage("categorize")
 
     from pipeline.project import load_project

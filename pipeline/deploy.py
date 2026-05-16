@@ -69,16 +69,17 @@ def _push_with_retry(tag: str, attempts: int = 3, backoffs=(5, 20, 60)) -> None:
     raise last_err
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--project", required=True, help="project directory (reads project.toml → DeployConfig)")
-    ap.add_argument("--adapter", default=None, help="HF PEFT LoRA adapter dir (default: <project>/dataset/adapter/final, where `train` writes it)")
-    ap.add_argument("--llama-cpp-dir", default=None, help="path to a llama.cpp checkout (has convert_lora_to_gguf.py)")
-    ap.add_argument("--outdir", default=None, help="where to write the GGUF + Modelfile (default: <project>/dataset/adapter)")
-    ap.add_argument("--tag", default=None, help="override the Ollama tag")
-    ap.add_argument("--push", action="store_true", help="`ollama push` the created tag afterward")
-    ap.add_argument("--dry-run", action="store_true", help="write the GGUF + Modelfile but don't `ollama create`")
-    args = ap.parse_args()
+def main(args=None):
+    if args is None:
+        ap = argparse.ArgumentParser()
+        ap.add_argument("--project", required=True, help="project directory (reads project.toml → DeployConfig)")
+        ap.add_argument("--adapter", default=None, help="HF PEFT LoRA adapter dir (default: <project>/dataset/adapter/final, where `train` writes it)")
+        ap.add_argument("--llama-cpp-dir", default=None, help="path to a llama.cpp checkout (has convert_lora_to_gguf.py)")
+        ap.add_argument("--outdir", default=None, help="where to write the GGUF + Modelfile (default: <project>/dataset/adapter)")
+        ap.add_argument("--tag", default=None, help="override the Ollama tag")
+        ap.add_argument("--push", action="store_true", help="`ollama push` the created tag afterward")
+        ap.add_argument("--dry-run", action="store_true", help="write the GGUF + Modelfile but don't `ollama create`")
+        args = ap.parse_args()
     events.set_stage("deploy")
 
     from pipeline.project import load_project

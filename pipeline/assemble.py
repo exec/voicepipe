@@ -46,17 +46,18 @@ def _load(path) -> list:
     return out
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--project", default=None, help="project directory (reads project.toml → AssembleConfig)")
-    ap.add_argument("--keep", default=None, help="override path to triage keep.jsonl")
-    ap.add_argument("--seeds", default=None, help="override path to seeds jsonl")
-    ap.add_argument("--salvage", action="append", default=None, help="override salvage jsonl path(s); repeatable")
-    ap.add_argument("--out-dir", default=None, help="override output dir")
-    ap.add_argument("--val-fraction", type=float, default=None,
-                    help="fraction of pairs reserved for val.jsonl (honored strictly; a stderr warning is emitted if the resulting val set is < 20 pairs)")
-    ap.add_argument("--seed", type=int, default=None)
-    args = ap.parse_args()
+def main(args=None):
+    if args is None:
+        ap = argparse.ArgumentParser()
+        ap.add_argument("--project", default=None, help="project directory (reads project.toml → AssembleConfig)")
+        ap.add_argument("--keep", default=None, help="override path to triage keep.jsonl")
+        ap.add_argument("--seeds", default=None, help="override path to seeds jsonl")
+        ap.add_argument("--salvage", action="append", default=None, help="override salvage jsonl path(s); repeatable")
+        ap.add_argument("--out-dir", default=None, help="override output dir")
+        ap.add_argument("--val-fraction", type=float, default=None,
+                        help="fraction of pairs reserved for val.jsonl (honored strictly; a stderr warning is emitted if the resulting val set is < 20 pairs)")
+        ap.add_argument("--seed", type=int, default=None)
+        args = ap.parse_args()
     events.set_stage("assemble")
 
     from pipeline.project import AssembleConfig

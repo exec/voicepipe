@@ -105,17 +105,18 @@ def _process_batch(client, model, rubric, batch_pairs, batch_idxs):
     return (_parse(response), None, batch_idxs)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--project", default=None, help="project directory (reads project.toml → TriageConfig)")
-    ap.add_argument("--in", dest="in_path", default=None, help="override input dedup pairs.jsonl")
-    ap.add_argument("--out-dir", default=None, help="override output triage dir")
-    ap.add_argument("--model", default=None)
-    ap.add_argument("--batch-size", type=int, default=None)
-    ap.add_argument("--min-keep", type=int, default=None)
-    ap.add_argument("--concurrency", type=int, default=None)
-    ap.add_argument("--max-pairs", type=int, default=None, help="dry-run cap")
-    args = ap.parse_args()
+def main(args=None):
+    if args is None:
+        ap = argparse.ArgumentParser()
+        ap.add_argument("--project", default=None, help="project directory (reads project.toml → TriageConfig)")
+        ap.add_argument("--in", dest="in_path", default=None, help="override input dedup pairs.jsonl")
+        ap.add_argument("--out-dir", default=None, help="override output triage dir")
+        ap.add_argument("--model", default=None)
+        ap.add_argument("--batch-size", type=int, default=None)
+        ap.add_argument("--min-keep", type=int, default=None)
+        ap.add_argument("--concurrency", type=int, default=None)
+        ap.add_argument("--max-pairs", type=int, default=None, help="dry-run cap")
+        args = ap.parse_args()
     events.set_stage("triage")
 
     from pipeline.project import TriageConfig
