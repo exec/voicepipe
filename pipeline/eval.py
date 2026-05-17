@@ -213,10 +213,25 @@ def parse_judge_json(text: str) -> dict | None:
 
 
 def load_prompts(path: Path) -> list[dict]:
+    """Load eval prompts (one JSON object per line). Skips blank / malformed lines and
+    any object missing a `user` field; warns on each so a typo doesn't silently shrink
+    the eval set. `tag` defaults positionally; `tier`/`category` default to "default"."""
     out = []
-    for line in path.read_text().splitlines():
-        if line.strip():
-            out.append(json.loads(line))
+    for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as e:
+            print(f"[eval] skipping malformed prompt line {i}: {e}", file=sys.stderr)
+            continue
+        if not isinstance(obj, dict) or not obj.get("user"):
+            print(f"[eval] skipping prompt line {i}: not a {{\"user\": ...}} object", file=sys.stderr)
+            continue
+        obj.setdefault("tag", f"p{len(out)}")
+        obj.setdefault("tier", "default")
+        obj.setdefault("category", "default")
+        out.append(obj)
     return out
 
 
@@ -673,9 +688,15 @@ def main(args=None):
         out_dir = DEFAULT_OUT_DIR
 
     if not args.model and not args.compare:
-        ap.error("provide --model (absolute) or --compare A B (pairwise) — or --project with a deploy.ollama_tag set")
+        msg = "provide --model (absolute) or --compare A B (pairwise) — or --project with a deploy.ollama_tag set"
+        print(f"[eval] {msg}", file=sys.stderr)
+        events.stage_end(status="error", exit_code=2, error=msg)
+        return 2
     if args.model and args.compare:
-        ap.error("use either --model or --compare, not both")
+        msg = "use either --model or --compare, not both"
+        print(f"[eval] {msg}", file=sys.stderr)
+        events.stage_end(status="error", exit_code=2, error=msg)
+        return 2
     if not args.prompts.is_file():
         msg = f"no eval prompts at {args.prompts}"
         print(f"[eval] {msg}", file=sys.stderr)
