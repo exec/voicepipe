@@ -3,11 +3,14 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "voicepipe"
+name = "voicepipe-engine"
 version = "0.2.0"
 description = "Corpus-to-character pipeline: synthesize a fine-tuning dataset in a target voice, dedup it, triage it, assemble it, train a QLoRA adapter, and deploy via Ollama."
 readme = "README.md"
 license = { file = "LICENSE" }
+authors = [
+    { name = "Dylan Hart", email = "execxd@icloud.com" },
+]
 requires-python = ">=3.10"
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -32,9 +35,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/execxd/voicepipe"
-Source = "https://github.com/execxd/voicepipe"
-Issues = "https://github.com/execxd/voicepipe/issues"
+Homepage = "https://github.com/exec/voicepipe"
+Source = "https://github.com/exec/voicepipe"
+Issues = "https://github.com/exec/voicepipe/issues"
 
 [project.optional-dependencies]
 # `pip install -e .[train]` on the training box (a CUDA GPU)
