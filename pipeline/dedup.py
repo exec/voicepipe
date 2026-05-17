@@ -76,6 +76,7 @@ def load_raw_pairs(raw_dir: Path) -> list:
                 continue
             msgs = pair.get("messages")
             if (not isinstance(msgs, list) or len(msgs) != 2
+                    or not isinstance(msgs[0], dict) or not isinstance(msgs[1], dict)
                     or not isinstance(msgs[0].get("content"), str) or not isinstance(msgs[1].get("content"), str)
                     or not msgs[0]["content"].strip() or not msgs[1]["content"].strip()):
                 malformed += 1

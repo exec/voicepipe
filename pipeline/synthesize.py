@@ -56,6 +56,8 @@ def _is_valid_pair(obj) -> bool:
         and "messages" in obj
         and isinstance(obj["messages"], list)
         and len(obj["messages"]) == 2
+        and isinstance(obj["messages"][0], dict)
+        and isinstance(obj["messages"][1], dict)
         and obj["messages"][0].get("role") == "user"
         and obj["messages"][1].get("role") == "assistant"
         and isinstance(obj["messages"][0].get("content"), str)

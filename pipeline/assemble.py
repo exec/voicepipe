@@ -38,8 +38,10 @@ def _load(path) -> list:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if not isinstance(obj, dict):
+            continue
         for m in obj.get("messages", []):
-            if isinstance(m.get("content"), str):
+            if isinstance(m, dict) and isinstance(m.get("content"), str):
                 m["content"] = normalize_punctuation(m["content"])
         if valid_pair(obj):
             out.append(obj)

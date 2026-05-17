@@ -49,8 +49,9 @@ def assistant_text(pair: dict) -> str:
 def valid_pair(obj) -> bool:
     msgs = obj.get("messages") if isinstance(obj, dict) else None
     return (isinstance(msgs, list) and len(msgs) == 2
+            and isinstance(msgs[0], dict) and isinstance(msgs[1], dict)
             and isinstance(msgs[0].get("content"), str) and isinstance(msgs[1].get("content"), str)
-            and msgs[0]["content"].strip() and msgs[1]["content"].strip())
+            and bool(msgs[0]["content"].strip()) and bool(msgs[1]["content"].strip()))
 
 
 def mode_summary(pairs: list, abbrev: dict | None = None) -> str:

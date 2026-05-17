@@ -57,7 +57,11 @@ def _load_prompts(path: Path):
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        user = obj.get("user") or obj.get("prompt") or obj.get("messages", [{}])[0].get("content")
+        if not isinstance(obj, dict):
+            continue
+        msgs = obj.get("messages")
+        first_msg = msgs[0] if isinstance(msgs, list) and msgs and isinstance(msgs[0], dict) else {}
+        user = obj.get("user") or obj.get("prompt") or first_msg.get("content")
         if user:
             out.append((obj.get("tag", f"p{len(out)}"), user))
     return out or _DEFAULT_PROMPTS
