@@ -28,7 +28,7 @@ classifiers = [
 dependencies = [
     "requests>=2.31",
     "numpy>=1.24",
-    "clir",
+    "pyclir>=0.2.1",
 ]
 
 [project.urls]
